@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 56rem; margin: 1.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    h2 { font-size: 1.05rem; margin-top: 1.6rem; }
+    form, .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .75rem 0; }
+    input[type=text], input[type=password] { min-width: 12rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ddd; text-align: left; padding: .35rem .4rem; vertical-align: top; font-size: .92rem; }
+    .muted { color: #555; }
+    .err { color: #a40000; white-space: pre-wrap; }
+    .ok { color: #0a5; white-space: pre-wrap; }
+    code { font-size: .92em; }
+  </style>
+</head>
+<body>
+  <h1>管理面</h1>
+  <p class="muted">仅 <code>role=admin</code>。看不到用户 API Key 明文，最多「已配置 / 未配置」。下线复用站点 takedown；停运行时走 runtime-manager，不挂 docker.sock。</p>
+  <p><a href="/">Agent UI</a> · <a href="/files">文件</a> · <a href="/sites">站点</a> · <a href="/plugins">插件组合</a> · <a href="/auth/logout">登出</a></p>
+  <p id="status" class="ok"></p>
+  <p id="err" class="err"></p>
+
+  <h2>用户</h2>
+  <form id="invite">
+    <label>邀请码 <input type="text" name="code" placeholder="留空则生成"></label>
+    <button type="submit">发邀请</button>
+  </form>
+  <form id="reset">
+    <label>userId <input type="text" name="userId" required></label>
+    <label>新密码 <input type="password" name="password" required minlength="8"></label>
+    <button type="submit">重置密码</button>
+  </form>
+  <table>
+    <thead><tr><th>username</th><th>role</th><th>status</th><th>凭证</th><th>created</th><th></th></tr></thead>
+    <tbody id="users"></tbody>
+  </table>
+
+  <h2>站点</h2>
+  <table>
+    <thead><tr><th>slug</th><th>owner</th><th>status</th><th>url</th><th></th></tr></thead>
+    <tbody id="sites"></tbody>
+  </table>
+
+  <h2>运行时</h2>
+  <div class="row">
+    <button type="button" id="refreshRuntimes">刷新</button>
+  </div>
+  <table>
+    <thead><tr><th>name</th><th>userId</th><th>status</th><th></th></tr></thead>
+    <tbody id="runtimes"></tbody>
+  </table>
+
+  <h2>官方插件组合</h2>
+  <p class="muted">只登记官方插件 id（例如 <code>hmr</code>）。自写 JS / 路径 / URL 会被拒绝。用户在 <a href="/plugins">/plugins</a> 套用到<strong>自己的</strong> home，A 不会改 B。</p>
+  <form id="preset">
+    <label>名称 <input type="text" name="name" required maxlength="80" placeholder="关闭 hmr"></label>
+    <label>pluginIds <input type="text" name="pluginIds" placeholder="hmr（逗号分隔；可空）"></label>
+    <button type="submit">添加官方组合</button>
+  </form>
+
+  <h2>最近审计</h2>
+  <p class="muted">只读，来自 <code>audit_log</code>。meta 里的 token 类字段会打码。</p>
+  <div class="row">
+    <button type="button" id="refreshAudit">刷新</button>
+  </div>
+  <table>
+    <thead><tr><th>time</th><th>actor</th><th>action</th><th>target</th><th>meta</th></tr></thead>
+    <tbody id="audit"></tbody>
+  </table>
+
+  <script>
+    const errEl = document.getElementById("err");
+    const statusEl = document.getElementById("status");
+
+    function showErr(t) { errEl.textContent = t || ""; }
+    function showOk(t) { statusEl.textContent = t || ""; }
+
+    async function api(url, opts) {
+      const res = await fetch(url, { credentials: "same-origin", ...opts });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      if (!res.ok) {
+        throw new Error(res.status + " " + (data.error || text));
+      }
+      return data;
+    }
+
+    async function loadUsers() {
+      const data = await api("/admin/users");
+      const rows = document.getElementById("users");
+      rows.replaceChildren();
+      for (const u of data.users || []) {
+        const tr = document.createElement("tr");
+        const nameTd = document.createElement("td");
+        nameTd.textContent = u.username + " (" + u.id + ")";
+        const roleTd = document.createElement("td");
+        roleTd.textContent = u.role;
+        const stTd = document.createElement("td");
+        stTd.textContent = u.status;
+        const credTd = document.createElement("td");
+        credTd.textContent = u.credentials === "configured" ? "已配置" : "未配置";
+        const createdTd = document.createElement("td");
+        createdTd.textContent = u.created_at ? String(u.created_at) : "";
+        const actTd = document.createElement("td");
+        if (u.status !== "disabled") {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "封禁";
+          btn.onclick = () => disableUser(u.id);
+          actTd.appendChild(btn);
+        }
+        tr.append(nameTd, roleTd, stTd, credTd, createdTd, actTd);
+        rows.appendChild(tr);
+      }
+    }
+
+    async function loadSites() {
+      const data = await api("/admin/sites");
+      const rows = document.getElementById("sites");
+      rows.replaceChildren();
+      for (const s of data.sites || []) {
+        const tr = document.createElement("tr");
+        const slugTd = document.createElement("td");
+        slugTd.textContent = s.slug;
+        const ownerTd = document.createElement("td");
+        ownerTd.textContent = s.owner || "";
+        const stTd = document.createElement("td");
+        stTd.textContent = s.status;
+        const urlTd = document.createElement("td");
+        if (s.url) {
+          const a = document.createElement("a");
+          a.href = s.url;
+          a.textContent = s.url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          urlTd.appendChild(a);
+        }
+        const actTd = document.createElement("td");
+        if (s.status !== "taken_down") {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "下线";
+          btn.onclick = () => takedown(s.id);
+          actTd.appendChild(btn);
+        }
+        tr.append(slugTd, ownerTd, stTd, urlTd, actTd);
+        rows.appendChild(tr);
+      }
+    }
+
+    async function loadRuntimes() {
+      const data = await api("/admin/runtimes");
+      const rows = document.getElementById("runtimes");
+      rows.replaceChildren();
+      for (const r of data.runtimes || []) {
+        const tr = document.createElement("tr");
+        const nameTd = document.createElement("td");
+        nameTd.textContent = r.name;
+        const idTd = document.createElement("td");
+        idTd.textContent = r.userId || "";
+        const stTd = document.createElement("td");
+        stTd.textContent = r.status;
+        const actTd = document.createElement("td");
+        if (r.userId && r.running) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "停止";
+          btn.onclick = () => stopRuntime(r.userId);
+          actTd.appendChild(btn);
+        }
+        tr.append(nameTd, idTd, stTd, actTd);
+        rows.appendChild(tr);
+      }
+    }
+
+    async function loadAudit() {
+      const data = await api("/admin/audit?limit=50");
+      const rows = document.getElementById("audit");
+      rows.replaceChildren();
+      for (const a of data.entries || []) {
+        const tr = document.createElement("tr");
+        const tTd = document.createElement("td");
+        tTd.textContent = a.createdAt ? String(a.createdAt) : "";
+        const actorTd = document.createElement("td");
+        actorTd.textContent = a.actorId || "";
+        const actTd = document.createElement("td");
+        actTd.textContent = a.action || "";
+        const targetTd = document.createElement("td");
+        targetTd.textContent = a.target || "";
+        const metaTd = document.createElement("td");
+        metaTd.textContent = a.meta == null ? "" : JSON.stringify(a.meta);
+        tr.append(tTd, actorTd, actTd, targetTd, metaTd);
+        rows.appendChild(tr);
+      }
+    }
+
+    async function disableUser(userId) {
+      showErr("");
+      showOk("");
+      try {
+        const data = await api("/admin/users/disable", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId }),
+        });
+        showOk("已封禁 " + (data.username || userId));
+        await Promise.all([loadUsers(), loadRuntimes()]);
+      } catch (err) {
+        showErr(err.message);
+      }
+    }
+
+    async function takedown(siteId) {
+      showErr("");
+      showOk("");
+      try {
+        const data = await api("/admin/sites/takedown", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ siteId }),
+        });
+        showOk("已下线 " + (data.slug || siteId));
+        await loadSites();
+      } catch (err) {
+        showErr(err.message);
+      }
+    }
+
+    async function stopRuntime(userId) {
+      showErr("");
+      showOk("");
+      try {
+        const data = await api("/admin/runtimes/stop", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId }),
+        });
+        showOk("已停止 " + (data.name || userId));
+        await loadRuntimes();
+      } catch (err) {
+        showErr(err.message);
+      }
+    }
+
+    document.getElementById("invite").onsubmit = async (ev) => {
+      ev.preventDefault();
+      showErr("");
+      showOk("");
+      const fd = new FormData(ev.target);
+      const code = String(fd.get("code") || "").trim();
+      const body = {};
+      if (code) body.code = code;
+      try {
+        const data = await api("/admin/invites", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        showOk("邀请码：" + data.code);
+        ev.target.reset();
+      } catch (err) {
+        showErr(err.message);
+      }
+    };
+
+    document.getElementById("reset").onsubmit = async (ev) => {
+      ev.preventDefault();
+      showErr("");
+      showOk("");
+      const fd = new FormData(ev.target);
+      try {
+        await api("/admin/users/reset-password", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            userId: String(fd.get("userId") || "").trim(),
+            password: String(fd.get("password") || ""),
+          }),
+        });
+        showOk("密码已重置（明文不回传）");
+        ev.target.reset();
+      } catch (err) {
+        showErr(err.message);
+      }
+    };
+
+    document.getElementById("refreshRuntimes").onclick = () => {
+      showErr("");
+      loadRuntimes().catch((err) => showErr(err.message));
+    };
+
+    document.getElementById("refreshAudit").onclick = () => {
+      showErr("");
+      loadAudit().catch((err) => showErr(err.message));
+    };
+
+    document.getElementById("preset").onsubmit = async (ev) => {
+      ev.preventDefault();
+      showErr("");
+      showOk("");
+      const fd = new FormData(ev.target);
+      const name = String(fd.get("name") || "").trim();
+      const pluginIds = String(fd.get("pluginIds") || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      try {
+        const data = await api("/admin/plugin-presets", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, pluginIds }),
+        });
+        showOk("已添加 " + (data.name || name) + " (" + (data.id || "") + ")");
+        ev.target.reset();
+      } catch (err) {
+        showErr(err.message);
+      }
+    };
+
+    Promise.all([loadUsers(), loadSites(), loadRuntimes(), loadAudit()]).catch((err) => showErr(err.message));
+  </script>
+</body>
+</html>

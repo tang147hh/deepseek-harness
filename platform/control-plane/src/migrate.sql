@@ -81,3 +81,44 @@ CREATE TABLE IF NOT EXISTS site_kv (
 );
 
 CREATE INDEX IF NOT EXISTS site_kv_site_id_idx ON site_kv (site_id);
+
+-- Admin audit trail (plate K). Safe to re-run on an existing volume.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID REFERENCES users (id),
+  action TEXT NOT NULL,
+  target TEXT,
+  meta JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS audit_log_created_at_idx ON audit_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS audit_log_actor_id_idx ON audit_log (actor_id);
+
+-- Official plugin preset packages (plate J). Ids only; never user JS/paths.
+-- Safe to re-run on an existing volume (IF NOT EXISTS + seed ON CONFLICT).
+CREATE TABLE IF NOT EXISTS plugin_presets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  plugin_ids TEXT[] NOT NULL DEFAULT '{}',
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT plugin_presets_name_key UNIQUE (name),
+  CONSTRAINT plugin_presets_name_len CHECK (char_length(name) BETWEEN 1 AND 80)
+);
+
+INSERT INTO plugin_presets (id, name, plugin_ids, description)
+VALUES
+  (
+    'a1000000-0000-4000-8000-000000000001',
+    '默认 Web',
+    '{}',
+    '官方 Web 默认组合。只保留 platform-publish-site，不含自写代码。'
+  ),
+  (
+    'a1000000-0000-4000-8000-000000000002',
+    '关闭 hmr',
+    ARRAY['hmr']::text[],
+    '在当前用户自己的 overlay 里把官方 hmr 设为 disabled: true。'
+  )
+ON CONFLICT (id) DO NOTHING;

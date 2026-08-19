@@ -114,6 +114,10 @@ function sendHtml(res, status, html) {
   send(res, status, { "content-type": "text/html; charset=utf-8" }, html);
 }
 
+function sendRedirect(res, location, extraHeaders = {}) {
+  send(res, 302, { location, ...extraHeaders }, "");
+}
+
 function sendJson(res, status, obj, extraHeaders = {}) {
   send(
     res,
@@ -200,6 +204,7 @@ module.exports = {
   clearSessionCookie,
   sendText,
   sendHtml,
+  sendRedirect,
   sendJson,
   readJson,
   publicUser,

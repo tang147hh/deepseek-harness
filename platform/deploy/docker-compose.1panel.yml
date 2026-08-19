@@ -1,0 +1,25 @@
+# Overlay for 1Panel production (OpenResty already binds 80/443).
+# Usage (from this directory, with server .env):
+#   docker compose -f docker-compose.yml -f docker-compose.1panel.yml up -d --no-build \
+#     postgres control-plane pages runtime-manager runtime-image
+#
+# - Publish control-plane / pages on loopback only (1Panel reverse-proxies them).
+# - Do not publish user dsh 3080.
+# - Do not start Compose Caddy (profile `caddy` is opt-in; never enable it while
+#   1Panel owns 80/443).
+# - Do not `compose build runtime-image` on the 8G host; dsh-runtime:web is
+#   already present. After code updates, rebuild only control-plane / pages /
+#   runtime-manager.
+
+services:
+  caddy:
+    profiles:
+      - caddy
+
+  control-plane:
+    ports:
+      - "127.0.0.1:18080:8080"
+
+  pages:
+    ports:
+      - "127.0.0.1:18081:8080"

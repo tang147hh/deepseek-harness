@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Official plugin presets</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ddd; text-align: left; padding: .35rem .4rem; vertical-align: top; }
+    .muted { color: #555; }
+    .err { color: #a40000; white-space: pre-wrap; }
+    .ok { color: #0a5; white-space: pre-wrap; }
+    code { font-size: .92em; }
+  </style>
+</head>
+<body>
+  <h1>官方插件组合</h1>
+  <p class="muted">只把<strong>官方插件 id</strong> 写进当前用户自己的 <code>$DSH_HOME/cordis.patch.yml</code>（<code>disabled: true/false</code>）。自写插件保持私有，不会上架，也不会拷到别人的 home。套用 A 不影响 B。不占 <code>/api</code>，也不进 dsh Settings。</p>
+  <p><a href="/">Agent UI</a> · <a href="/files">文件</a> · <a href="/sites">站点</a> · <a href="/auth/logout">登出</a></p>
+  <p id="me" class="muted"></p>
+  <p id="status" class="ok"></p>
+  <p id="err" class="err"></p>
+  <table>
+    <thead><tr><th>name</th><th>pluginIds</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <script>
+    const errEl = document.getElementById("err");
+    const statusEl = document.getElementById("status");
+    const meEl = document.getElementById("me");
+    const rowsEl = document.getElementById("rows");
+
+    function showErr(t) { errEl.textContent = t || ""; }
+    function showOk(t) { statusEl.textContent = t || ""; }
+
+    async function api(url, opts) {
+      const res = await fetch(url, { credentials: "same-origin", ...opts });
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      if (!res.ok) {
+        throw new Error(res.status + " " + (data.error || text));
+      }
+      return data;
+    }
+
+    async function loadMe() {
+      const me = await api("/plugins/me");
+      if (!me.exists) {
+        meEl.textContent = "当前用户还没有 cordis.patch.yml（ensure 时会写入 platform-publish-site，已有文件不会被 ensure 覆盖）。";
+        return;
+      }
+      if (!me.parsed) {
+        meEl.textContent = "已有 patch 文件，但无法解析为官方 overlay（不会把 yaml 打出来）。";
+        return;
+      }
+      const ids = me.disabledOfficialIds || [];
+      meEl.textContent = ids.length
+        ? ("当前 overlay 里 disabled 的官方 id：" + ids.join(", "))
+        : "当前 overlay 没有额外 disabled 的官方 id。";
+    }
+
+    async function loadPresets() {
+      const data = await api("/plugins/presets");
+      rowsEl.replaceChildren();
+      for (const p of data.presets || []) {
+        const tr = document.createElement("tr");
+        const nameTd = document.createElement("td");
+        nameTd.textContent = p.name || "";
+        const idsTd = document.createElement("td");
+        const ids = p.pluginIds || [];
+        idsTd.textContent = ids.length ? ids.join(", ") : "（无额外 disabled）";
+        const actTd = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "套用到我的 home";
+        btn.onclick = () => applyPreset(p.id, p.name);
+        actTd.appendChild(btn);
+        tr.append(nameTd, idsTd, actTd);
+        rowsEl.appendChild(tr);
+      }
+    }
+
+    async function applyPreset(presetId, name) {
+      showErr("");
+      showOk("");
+      try {
+        const data = await api("/plugins/apply", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ presetId }),
+        });
+        const rt = data.runtime && data.runtime.restarted ? "；已重启该用户 runtime" : "";
+        showOk("已套用「" + (name || presetId) + "」到当前用户 home" + rt);
+        await loadMe();
+      } catch (err) {
+        showErr(err.message);
+      }
+    }
+
+    Promise.all([loadMe(), loadPresets()]).catch((err) => showErr(err.message));
+  </script>
+</body>
+</html>

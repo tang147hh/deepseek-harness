@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const docker = require("./docker");
 const { normalizePath, sendText, sendJson, readJson, bearerToken, tokenOk } = require("./http");
+const { attachRequestLog, logError } = require("./log");
 const runtimes = require("./runtimes");
 
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -30,13 +31,14 @@ function sendErr(res, err) {
     sendJson(res, err.status, { error: err.code || "error", ...(err.extra || {}) });
     return;
   }
-  process.stderr.write(`runtime-manager error: ${err.stack || err.message}\n`);
+  logError(err, { svc: "runtime-manager" });
   sendJson(res, 500, { error: "internal" });
 }
 
 async function handle(req, res) {
   const method = req.method ?? "GET";
   const pathname = normalizePath(req.url);
+  attachRequestLog(req, res, { svc: "runtime-manager" });
 
   if (method === "GET" && pathname === "/healthz") {
     sendText(res, 200, "ok\n");
@@ -61,10 +63,23 @@ async function handle(req, res) {
     return;
   }
 
+  if (method === "POST" && pathname === "/stop") {
+    const body = await readJson(req);
+    const result = await runtimes.stop(body.userId);
+    sendJson(res, 200, result);
+    return;
+  }
+
   if (method === "POST" && pathname.startsWith("/stop/")) {
     const userId = userIdFromPath(pathname, "/stop/");
     const result = await runtimes.stop(userId);
     sendJson(res, 200, result);
+    return;
+  }
+
+  if (method === "GET" && pathname === "/list") {
+    const listed = await runtimes.list();
+    sendJson(res, 200, { runtimes: listed });
     return;
   }
 
@@ -104,7 +119,7 @@ async function main() {
   const checkMs = Math.min(30_000, Math.max(5_000, Math.floor((runtimes.IDLE_SECONDS * 1000) / 30)));
   idleTimer = setInterval(() => {
     runtimes.sweepIdle().catch((err) => {
-      process.stderr.write(`idle sweep failed: ${err.message}\n`);
+      logError(err, { svc: "runtime-manager", path: "idle-sweep" });
     });
   }, checkMs);
   idleTimer.unref();
@@ -127,6 +142,6 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 main().catch((err) => {
-  process.stderr.write(`runtime-manager failed to start: ${err.stack || err.message}\n`);
+  logError(err, { svc: "runtime-manager", path: "startup" });
   process.exit(1);
 });

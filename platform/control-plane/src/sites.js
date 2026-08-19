@@ -12,7 +12,10 @@ const DEFAULT_SITE_MAX = 20 * 1024 * 1024;
 const KEEP_VERSIONS = 5;
 const SLUG_RE = /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const RESERVED_SLUGS = new Set(["www", "api", "admin", "login", "app", "static", "pages"]);
+const RESERVED_SLUGS = new Set([
+  "www", "api", "admin", "login", "app", "static", "pages",
+  "health", "cloud", "minio",
+]);
 const FORBIDDEN_NAMES = new Set([".env", ".credentials.yaml"]);
 const FORBIDDEN_EXT = new Set([".pem", ".key"]);
 const ALLOWED_EXT = new Set([
@@ -560,21 +563,41 @@ async function handleRotateToken(req, res, pool, user) {
   });
 }
 
-async function handleTakedown(req, res, pool, user) {
-  const body = await readJson(req);
-  const site = await loadOwnedSite(pool, user, body.siteId);
+async function loadSiteById(pool, siteId) {
+  if (!isUuid(siteId)) {
+    throw httpError(400, "invalid_site");
+  }
+  const { rows } = await pool.query(
+    `SELECT id, user_id, slug, status, current_version, created_at
+     FROM sites WHERE id = $1`,
+    [siteId],
+  );
+  const site = rows[0];
+  if (!site) {
+    throw httpError(404, "not_found");
+  }
+  return site;
+}
+
+async function takedownSite(pool, site) {
   await pool.query(`UPDATE sites SET status = 'taken_down' WHERE id = $1`, [site.id]);
   await writeSlugIndex(snapshotsRoot(), site.slug, {
     siteId: site.id,
     version: site.current_version,
     status: "taken_down",
   });
-  sendJson(res, 200, {
+  return {
     ok: true,
     siteId: site.id,
     slug: site.slug,
     status: "taken_down",
-  });
+  };
+}
+
+async function handleTakedown(req, res, pool, user) {
+  const body = await readJson(req);
+  const site = await loadOwnedSite(pool, user, body.siteId);
+  sendJson(res, 200, await takedownSite(pool, site));
 }
 
 async function handleSitesRequest(req, res, pool, user, usersRoot) {
@@ -633,4 +656,6 @@ module.exports = {
   collectStaticFiles,
   hashWriteToken,
   generateWriteToken,
+  loadSiteById,
+  takedownSite,
 };

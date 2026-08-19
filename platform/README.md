@@ -2,7 +2,7 @@
 
 `platform/` 是多用户外壳。Upstream [deepseek-harness](../deepseek-harness) 仍是**单用户本地 Agent**（`dsh web`）。多人场景是「控制面 + 每用户一个 dsh 容器」，不要把 Harness 改成多租户单体。
 
-本目录已完成**板块 A（基础设施）**、**板块 B（身份、会话与应用网关）**、**板块 C（运行时管理器）**、**板块 F（真正的 `dsh web`）**、**板块 D（登录用户读写自己的 workspace 文件）**、**板块 G（workspace/sites 打快照、子域名出静态站）**、**板块 H（已发布站的公网有限 JSON KV）**与**板块 I（对话里 Agent 调用 `publish_site` 打快照发布）**。没有插件市场、Admin 中台。
+本目录已完成**板块 A（基础设施）**、**板块 B（身份、会话与应用网关）**、**板块 C（运行时管理器）**、**板块 F（真正的 `dsh web`）**、**板块 D（登录用户读写自己的 workspace 文件）**、**板块 G（workspace/sites 打快照、子域名出静态站）**、**板块 H（已发布站的公网有限 JSON KV）**、**板块 I（对话里 Agent 调用 `publish_site` 打快照发布）**、**板块 K（`role=admin` 管理面：用户 / 下线站点 / 停运行时）**、**板块 L（一行 JSON 日志、审计列表、Postgres 备份脚本）**、**板块 J（官方插件 preset 组合包第一期：只引用官方 id，套用到当前用户自己的 `$DSH_HOME/cordis.patch.yml`）**，以及**浏览器登录/注册页**（`GET /auth/login`、`GET /auth/register`；未登录打开 `/` 会转到登录页）。自写插件保持私有，不会上架，也不会拷到别人的运行时。
 
 ## 目录
 
@@ -10,12 +10,15 @@
 platform/
   README.md
   .gitignore
-  control-plane/         # /healthz、/auth/*、/me、/files、/sites；登录后 / 与 /api 反代该用户 dsh
+  control-plane/         # /healthz、/auth/*、/me、/files、/sites、/plugins、/admin；登录后 / 与 /api 反代该用户 dsh
   runtime-manager/       # 按用户 ensure/start/stop 隔离容器（仅 internal 调用）
   pages/src/             # 按 Host 出静态站 + /v1/kv；未知 Host → 404「No site」
   agent-bridge/          # Cordis 插件：模型工具 publish_site（装进 runtime 末层）
+  scripts/               # 自测；backup-postgres.sh（板块 L，不是常驻服务）
   deploy/
     docker-compose.yml
+    docker-compose.1panel.yml  # 1Panel：127.0.0.1:18080/18081，默认不启 Caddy
+    openresty.1panel.conf      # 可选：粘到 1Panel OpenResty（www WS + pages 剥 Cookie）
     Caddyfile
     Dockerfile.control
     Dockerfile.manager
@@ -28,7 +31,7 @@ platform/
     .env.example
 ```
 
-以后会补上、本步不要写：`admin-web/`。插件市场与 Admin 中台仍未做。
+Admin 是控制面自己的 HTML + JSON（`/admin`），不是独立 `admin-web/` 服务，也不进 dsh 进程。J 一期只提供官方插件 **id 组合包**，不是用户 JS 插件市场上架。
 
 ## 架构约束
 
@@ -47,7 +50,7 @@ platform/
 
 Compose 卷可以用相对路径 `DATA_ROOT=./data`（相对 `platform/deploy`）。用户容器的 bind **源路径**必须是 Docker Engine 看到的**宿主机绝对路径** `HOST_DATA_ROOT`：manager 容器内的 `./data` 不能当 bind 源。
 
-两者应指向同一目录：
+两者应指向同一目录。**不要删 `/data`**（或你设的 `DATA_ROOT`）：里面有 Postgres、用户卷、快照、Caddy 证书，以及备份目录。
 
 | 环境 | `DATA_ROOT` | `HOST_DATA_ROOT` |
 | --- | --- | --- |
@@ -61,6 +64,7 @@ Compose 卷可以用相对路径 `DATA_ROOT=./data`（相对 `platform/deploy`�
 | `{DATA_ROOT}/users/{id}/home` | 该用户 `DSH_HOME`（注册 mkdir；ensure 时 bind 到 `/data/home`） |
 | `{DATA_ROOT}/users/{id}/workspace` | 该用户工作区（注册 mkdir；ensure 时 bind 到 `/data/workspace`） |
 | `{DATA_ROOT}/snapshots` | 站点发布快照（板块 G） |
+| `{DATA_ROOT}/backups` | `pg_dump` 输出（板块 L；**不要提交 git**；**不要删 `/data`**） |
 | `{DATA_ROOT}/caddy` | Caddy 证书与本地 CA |
 
 ## 本机启动
@@ -89,7 +93,7 @@ docker compose up -d --build
 默认主机：
 
 - 控制面：`https://app.localhost/healthz` → `ok`
-- 登录 API：`https://app.localhost/auth/register`、`/auth/login`、`/me`
+- 登录：浏览器打开 `https://app.localhost/` 会转到 `/auth/login`；注册在 `/auth/register`（需要邀请码）。脚本仍可用 JSON `POST /auth/login`、`POST /auth/register`、`GET /me`
 - 登录后 `/files`（workspace 上传/列表；**不是** dsh UI）
 - 站点发布：登录后 `https://app.localhost/sites`（打快照；**不是** dsh UI）；Agent 也可调用 `publish_site`
 - Agent UI：登录后打开 `https://app.localhost/`（或 `/runtime`）→ dsh Web，**不是** `dsh-runtime-skeleton`
@@ -111,27 +115,48 @@ docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt
 
 ```sh
 docker compose -f platform/deploy/docker-compose.yml --env-file platform/deploy/.env.example config
+docker compose -f platform/deploy/docker-compose.yml -f platform/deploy/docker-compose.1panel.yml \
+  --env-file platform/deploy/.env.example config
 ```
 
 语法检查（不必 Docker）：
 
 ```sh
 node --check platform/control-plane/src/server.js
+node --check platform/control-plane/src/auth-pages.js
 node --check platform/control-plane/src/files.js
 node --check platform/control-plane/src/platform-token.js
 node --check platform/control-plane/src/platform-auth.js
 node --check platform/control-plane/src/sites.js
+node --check platform/control-plane/src/admin.js
+node --check platform/control-plane/src/audit.js
+node --check platform/control-plane/src/log.js
+node --check platform/control-plane/src/paths.js
+node --check platform/control-plane/src/runtime.js
+node --check platform/control-plane/src/plugins.js
+node --check platform/control-plane/src/official-plugins.js
+node --check platform/control-plane/src/plugin-patch.js
 node --check platform/pages/src/server.js
 node --check platform/pages/src/serve.js
 node --check platform/pages/src/kv.js
+node --check platform/pages/src/log.js
 node --check platform/runtime-manager/src/server.js
 node --check platform/runtime-manager/src/runtimes.js
+node --check platform/runtime-manager/src/log.js
 node --check platform/agent-bridge/index.js
 node platform/scripts/h-kv-selftest.js
 node platform/scripts/i-publish-selftest.js
+node platform/scripts/k-admin-selftest.js
+node platform/scripts/l-ops-selftest.js
+node platform/scripts/j-plugins-selftest.js
+node platform/scripts/auth-ui-selftest.js
 ```
 
 ## 服务器启动
+
+4C/8G + 1Panel（OpenResty 已占 80/443）走下一节 **1Panel 生产**，不要再让 Compose Caddy 绑 80/443。
+
+没有 1Panel、由本仓库 Caddy 占 80/443 时：
 
 1. 主机：Linux x86_64，Docker + Compose，放行 80/443。
 2. 复制 `.env.example` 为 `.env`，改主机名，并把 `DATA_ROOT` 与 `HOST_DATA_ROOT` 都设成同一绝对路径（例如 `/data`）。
@@ -164,6 +189,160 @@ PLATFORM_TOKEN_SECRET=change-me-platform-token-secret
 docker compose up -d --build
 ```
 
+## 1Panel 生产
+
+现场已拍板（**不要改这些域名**）：
+
+- `APP_HOST=www.996-code.com`
+- `PAGES_HOST=pages.996-code.com`
+- `PAGES_PARENT=pages.996-code.com`
+
+1Panel OpenResty 占 **80/443**。Cloudflare 橙云；源站证书用 1Panel。SSL 先 **Flexible**，源站 HTTPS 好了再切 **Full**。不要装 New API / MinIO / 其它栈。`dsh-runtime:web` 已在服务器编好，**禁止** `docker compose build runtime-image`。
+
+### Compose overlay（不抢 80/443）
+
+`docker-compose.1panel.yml` 把 control-plane / pages 映到环回，并把 Caddy 放到不会默认启用的 profile `caddy`。用户容器 **3080 仍然不映射**。
+
+在服务器 `platform/deploy`（已有 `.env`，`DATA_ROOT` / `HOST_DATA_ROOT` 均为 `/data`）：
+
+```sh
+cd platform/deploy
+docker compose -f docker-compose.yml -f docker-compose.1panel.yml up -d --no-build \
+  postgres control-plane pages runtime-manager runtime-image
+```
+
+`--no-build` 使用已有镜像，**不会**重编 `dsh-runtime:web`。`runtime-image` 仍是 one-shot（`command: true` 后退出），好让 runtime-manager 的 `depends_on` 通过。不要在这条命令里带上 `caddy`，也不要加 `--profile caddy`。
+
+第一次若还没有 `dsh-control-plane` / `dsh-pages` / `dsh-runtime-manager` 镜像，只 build 这三个，**不要** build `runtime-image`：
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
+  build control-plane pages runtime-manager
+```
+
+更新登录 UI / 控制面 / pages / manager 代码后，用下面「同步代码」里的 `up -d --build --no-deps control-plane`（可带 pages、runtime-manager）。**禁止** `docker compose build runtime-image`，也禁止不带 `--no-deps` 的 `up --build`（会扫到 `runtime-image`）。
+
+若误启了 Compose Caddy：`docker compose -f docker-compose.yml -f docker-compose.1panel.yml stop caddy`（或 `rm -f dsh-caddy`）。
+
+### 1Panel 网站
+
+| 网站 | 反代到 | 注意 |
+| --- | --- | --- |
+| `www.996-code.com` | `127.0.0.1:18080` | **必须**开 WebSocket / 透传 `Upgrade` 与 `Connection`。登录后 `/` 反代用户容器 3080，dsh 用 `/api/events.mux`、`/api/events.host`。**Host 保持 `www.996-code.com`**（与 `.env` 的 `APP_HOST`、`dsh --trusted-host` 一致），不要改成 `127.0.0.1:18080` |
+| `pages.996-code.com` 与 `*.pages.996-code.com` | `127.0.0.1:18081` | 现场可能还没建站。Host 用 `$host`（slug 靠子域名）。**剥 Cookie**：`proxy_hide_header Set-Cookie`、`proxy_set_header Cookie ""`（与 Caddyfile 对 pages 去 Cookie / Set-Cookie 同一意图） |
+
+Cookie `Domain` **只能是** `www.996-code.com`（即 `APP_HOST` 本身）。不要写成 `.996-code.com`，否则会进 pages。
+
+1Panel 面板：反代目标填 `http://127.0.0.1:18080`（www）或 `http://127.0.0.1:18081`（pages），勾选 **WebSocket**。若面板把 Host 写成 `$proxy_host` / 上游地址，改成站点名或下面片段。可粘贴配置：`platform/deploy/openresty.1panel.conf`。
+
+www 不要关 Upgrade：关了以后对话会断流（控制面 `upgrade` 进用户 dsh）。`proxy_read_timeout` / `proxy_send_timeout` 建议拉长（片段里 3600s），避免空闲 mux 被 60s 掐掉。
+
+### OpenResty / nginx location（可粘贴）
+
+`http {}` 里若还没有 `$connection_upgrade` map（1Panel 开 WebSocket 时通常已有，**不要重复**）：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+www → 18080（含 WebSocket；Host 保持公网名）：
+
+```nginx
+# server_name www.996-code.com;
+location / {
+    proxy_pass http://127.0.0.1:18080;
+    proxy_http_version 1.1;
+    proxy_set_header Host www.996-code.com;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+pages / `*.pages` → 18081（剥 Cookie；Host 用访客看到的子域）：
+
+```nginx
+# server_name pages.996-code.com *.pages.996-code.com;
+location / {
+    proxy_pass http://127.0.0.1:18081;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_hide_header Set-Cookie;
+    proxy_set_header Cookie "";
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+### 同步代码（更新登录 UI 后）
+
+把本机仓库同步到服务器时 **不要覆盖**：
+
+- 服务器 `platform/deploy/.env`（密钥、主机名、`DATA_ROOT`）
+- `/data`（Postgres、用户卷、快照、备份）
+
+排除示例：`.env`、`platform/deploy/.env`、`node_modules`、`platform/deploy/data`、`/data`。不要把本机 `.env` 或密钥拷上去。
+
+rsync（在本机仓库根；按实际用户/路径改）：
+
+```sh
+rsync -avz \
+  --exclude '.env' \
+  --exclude 'platform/deploy/.env' \
+  --exclude 'node_modules' \
+  --exclude 'platform/deploy/data' \
+  --exclude '.git' \
+  ./ user@SERVER:/opt/Deepseek_Harness/
+```
+
+scp 整树前先备份服务器 `.env`，拷完确认没被本机文件盖掉：
+
+```sh
+# 服务器上
+cp -a /opt/Deepseek_Harness/platform/deploy/.env /tmp/dsh.env.bak
+# 本机 scp 之后，若 .env 被覆盖：
+# cp -a /tmp/dsh.env.bak /opt/Deepseek_Harness/platform/deploy/.env
+```
+
+登录 UI / 控制面代码更新后，在服务器 **只**重建 control-plane（可顺带 pages / runtime-manager）。**禁止** `docker compose build runtime-image`，也禁止不带 `--no-deps` 的 `up --build`（会扫到 `runtime-image`）。
+
+```sh
+cd /opt/Deepseek_Harness/platform/deploy
+docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
+  up -d --build --no-deps control-plane
+# 若也改了 pages / runtime-manager：
+# docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
+#   up -d --build --no-deps control-plane pages runtime-manager
+```
+
+`--no-deps` 不会去 build/重启 postgres、Caddy、`runtime-image`。8G 机上的 `dsh-runtime:web` 保持不动。
+
+### 浏览器验收（www 已通 18080 时）
+
+1. 打开 `https://www.996-code.com/auth/login`，应是控制面登录页（不是 dsh）。
+2. 去 `/auth/register` 用邀请码注册（或已有账号登录）。成功后应进 `/`。
+3. `/` 应是 **dsh Web**（Agent UI），不是登录页、也不是 `dsh-runtime-skeleton` 纯文本。
+4. 开一轮对话：**不断流**。DevTools → Network 里 `/api/events.mux` 与 `/api/events.host` 应为 **101 Switching Protocols**（WebSocket）。若 400/502 或一直 pending 后断开，检查 www 站点是否透传 `Upgrade` / `Connection`，以及 Host 是否仍是 `www.996-code.com`。
+5. **无痕窗口**打开用户站（`https://pages.996-code.com/` 或 `https://{slug}.pages.996-code.com/`）：Application → Cookies **没有** `dsh_session`。响应不应出现 `Set-Cookie`。（pages 站点尚未创建时，这一条等建好再测。）
+
+编排自检（不必 up）：
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.1panel.yml --env-file .env.example config
+```
+
+合并后默认服务里不应出现 Caddy 的 `80:80` / `443:443`；control-plane / pages 应是 `127.0.0.1:18080` / `18081`；任何服务都不要映射用户 `3080`。
+
 ## DNS 与证书
 
 | 记录 | 值 |
@@ -173,7 +352,8 @@ docker compose up -d --build
 | `*.PAGES_PARENT` CNAME 或 A | 同一主机 |
 
 - 本机：`TLS_MODE=internal`，不必公网 DNS。
-- 服务器：`*.pages.…` **必须** DNS-01（HTTP-01 签不了通配名）。
+- 服务器 Caddy 路径：`*.pages.…` **必须** DNS-01（HTTP-01 签不了通配名）。
+- **1Panel 生产**：Cloudflare 橙云；源站证书用 1Panel。SSL 先 Flexible，源站 HTTPS 好了再 Full。`www.996-code.com` / `pages.996-code.com` / `*.pages.996-code.com` 指到同一台机。
 - 登录域与 pages 域保持兄弟关系（或不同注册域），不要把 App 放在 `example.com` 再把站点放在 `*.example.com`。
 
 ## 服务、端口、网络
@@ -182,10 +362,10 @@ Compose 项目名：`dsh-platform`。用户运行时**不要**写成长期 runni
 
 | 服务 | 容器名 | 监听 | 发布到宿主机 | 网络 |
 | --- | --- | --- | --- | --- |
-| caddy | `dsh-caddy` | 80, 443 | **80, 443** | `dsh-edge`, `dsh-internal`, `dsh-runtimes` |
+| caddy | `dsh-caddy` | 80, 443 | 本机路径：**80, 443**。**1Panel overlay：默认不启动**（profile `caddy`） | `dsh-edge`, `dsh-internal`, `dsh-runtimes` |
 | postgres | `dsh-postgres` | 5432 | 无 | **仅** `dsh-internal` |
-| control-plane | `dsh-control-plane` | **8080** | 无 | `dsh-internal` + `dsh-runtimes` |
-| pages | `dsh-pages` | **8080** | 无 | `dsh-internal` |
+| control-plane | `dsh-control-plane` | **8080** | 本机 Caddy 路径：无。**1Panel overlay：`127.0.0.1:18080`** | `dsh-internal` + `dsh-runtimes` |
+| pages | `dsh-pages` | **8080** | 本机 Caddy 路径：无。**1Panel overlay：`127.0.0.1:18081`** | `dsh-internal` |
 | runtime-manager | `dsh-runtime-manager` | **8080** | **无**（勿对公网暴露） | `dsh-internal` + `dsh-runtimes`；**唯此**可挂 docker.sock |
 | 用户 dsh（按需） | `dsh-runtime-{userId}` | **3080** | **无** | **仅** `dsh-runtimes` |
 
@@ -203,12 +383,17 @@ Caddy 的 `{$APP_HOST}` 整站反代 `control-plane:8080`；会话 Cookie 只写
 
 密码用 **scrypt**（不是明文或 md5）。会话是不透明 token，库里只存 `sha256(SESSION_SECRET + ":" + token)`。
 
+浏览器打开 `https://$APP_HOST/` 会 **302** 到 `/auth/login`。登录/注册是控制面自己的极简 HTML（`fetch` `POST` JSON，`credentials: same-origin`）。成功后进 `/`。已登录再打开登录/注册页会 **302** `/`。`POST` JSON API 不变，脚本/自测继续能用。Cookie 仍只写 `APP_HOST`。
+
 | 路由 | 登录 | 说明 |
 | --- | --- | --- |
 | `GET /healthz` | 否 | `200` 明文 `ok`（compose healthcheck） |
-| `POST /auth/register` | 否 | `{ username, password, inviteCode }`；无邀请 → 400 |
-| `POST /auth/login` | 否 | `{ username, password }` |
-| `POST /auth/logout` | 是 | 删当前 session，清 Cookie |
+| `GET /auth/login` | 否 | 登录页 HTML；已登录 → 302 `/` |
+| `GET /auth/register` | 否 | 注册页 HTML（邀请码）；已登录 → 302 `/` |
+| `GET /auth/logout` | 可无会话 | 删当前 session（若有），清 Cookie，302 `/auth/login` |
+| `POST /auth/register` | 否 | JSON `{ username, password, inviteCode }`；无邀请 → 400 |
+| `POST /auth/login` | 否 | JSON `{ username, password }` |
+| `POST /auth/logout` | 是 | JSON 删当前 session，清 Cookie |
 | `GET /me` | 是 | 当前用户；无 Cookie → 401 |
 | `GET /runtime/status` | 是 | JSON 运行时状态（不代理 UI） |
 | `GET /`、`/api`、静态资源、WebSocket | 是 | ensure 后反代到该用户 dsh 的 `/`（**不**剥前缀；SPA 请求 `/api` 不是 `/runtime/api`） |
@@ -217,14 +402,18 @@ Caddy 的 `{$APP_HOST}` 整站反代 `control-plane:8080`；会话 Cookie 只写
 | `POST /files/upload`、`GET /files/list`、`DELETE /files`、`GET /files/download` | 是 | 只读写该用户 `workspace` |
 | `GET /sites` | 是 | 极简发布/列表/回滚/下线页（控制面 HTML，不是 dsh UI） |
 | `GET /sites/list`、`POST /sites/publish`、`POST /sites/rollback`、`POST /sites/takedown`、`POST /sites/token` | 是（Cookie）；`list`/`publish` 也可 Bearer `PLATFORM_USER_TOKEN` | 快照发布 / 轮换站点写令牌（明文只回一次） |
-| 未登录 `GET /` | 否 | HTML 登录说明（401），不暴露 dsh |
-| 未登录 `/files`、`/sites`、`/api` 或其他 | 否 | 401 JSON |
+| `GET /plugins` | 是 | 极简套用页（控制面 HTML，不是 dsh UI） |
+| `GET /plugins/presets`、`POST /plugins/apply`、`GET /plugins/me` | 是 | 列出官方组合 / 套用到**当前用户** home / 解析自己 overlay 里 disabled 的官方 id |
+| `GET /admin` | 是（admin） | 管理面 HTML；未登录 **401**；`role=user` **403** |
+| `GET /admin/users`、`POST /admin/invites`、`POST /admin/users/disable`、`GET /admin/sites`、`POST /admin/sites/takedown`、`GET /admin/runtimes`、`POST /admin/runtimes/stop`、`GET /admin/audit`、`POST /admin/plugin-presets` | 是（admin） | 用户 / 邀请 / 下线 / 停运行时 / 最近审计 / 增加官方插件组合；响应不含 API Key 明文 |
+| 未登录 `GET /` | 否 | **302** `/auth/login`（不暴露 dsh）；`Accept` 含 `json` 时仍 **401** JSON |
+| 未登录 `/files`、`/sites`、`/plugins`、`/admin`、`/api` 或其他 | 否 | 401 JSON |
 
-`APP_HOST` 上除 `/healthz`、`/auth/login`、`/auth/register` 外都要有效会话。
+`APP_HOST` 上除 `/healthz`、`GET|POST /auth/login`、`GET|POST /auth/register`、`GET /auth/logout` 外都要有效会话。
 
-控制面**保留路径**（不会反代进 dsh）：`/healthz`、`/auth/*`、`/me`、`/runtime/status`、`/files`、`/files/*`、`/sites`、`/sites/*`。`/api` 仍是 dsh，不要占用。
+控制面**保留路径**（不会反代进 dsh）：`/healthz`、`/auth/*`、`/me`、`/runtime/status`、`/files`、`/files/*`、`/sites`、`/sites/*`、`/plugins`、`/plugins/*`、`/admin`、`/admin/*`。`/api` 仍是 dsh，不要占用。
 
-`PLATFORM_USER_TOKEN` **不能**当 `dsh_session`，也不能调 `/auth`、`/files`、`/me` 或 `/sites` HTML / rollback / takedown / token；只开放 `POST /sites/publish` 与 `GET /sites/list`。过期作废。KV `writeToken` 调这些接口是 **401**。
+`PLATFORM_USER_TOKEN` **不能**当 `dsh_session`，也不能调 `/auth`、`/files`、`/plugins`、`/me`、`/admin` 或 `/sites` HTML / rollback / takedown / token；只开放 `POST /sites/publish` 与 `GET /sites/list`。过期作废。KV `writeToken` 调这些接口是 **401**。
 
 ### 引导邀请码
 
@@ -234,7 +423,7 @@ Caddy 的 `{$APP_HOST}` 整站反代 `control-plane:8080`；会话 Cookie 只写
 bootstrap: users table is empty; one-time invite code: ...
 ```
 
-也可在 `platform/deploy/.env`（不要写进 `DATA_ROOT`）设 `BOOTSTRAP_INVITE_CODE`，空库时用这个码。第一个注册成功的用户 `role=admin`，之后默认 `user`。本步没有「再发邀请」的 API；测第二个用户可：
+也可在 `platform/deploy/.env`（不要写进 `DATA_ROOT`）设 `BOOTSTRAP_INVITE_CODE`，空库时用这个码。第一个注册成功的用户 `role=admin`，之后默认 `user`。管理员登录后打开 `https://$APP_HOST/admin` 发邀请、封禁、下线站点、停运行时。普通用户打 `/admin` 或 `/admin/*` 得 **403**。也可用 psql 插邀请（不必）：
 
 ```sh
 docker compose exec postgres psql -U dsh -d dsh -c "INSERT INTO invites (code) VALUES ('second-invite');"
@@ -244,13 +433,15 @@ docker compose exec postgres psql -U dsh -d dsh -c "INSERT INTO invites (code) V
 
 `Set-Cookie` 名：`dsh_session`。
 
-- `Domain` = `APP_HOST` 本身（如 `app.localhost`），**禁止** `.example.com` / `.localhost` 父域
+- `Domain` = `APP_HOST` 本身（本机 `app.localhost`；1Panel 生产 **`www.996-code.com`**），**禁止** `.example.com` / `.996-code.com` / `.localhost` 父域
 - `HttpOnly`、`Secure`、`SameSite=Lax`、`Path=/`
 - 只由 `{$APP_HOST}` 的控制面下发。Caddy 对 `{$PAGES_HOST}` 与 `*.{$PAGES_PARENT}` 已 `request_header -Cookie` 且 `header -Set-Cookie`，pages 域用不了这条会话
 
 `SESSION_SECRET` 见 `.env.example`（占位，不要提交真实值）。换 secret 会使已有 session 全部失效。
 
 ### curl 示例（本机，内部 CA 用 `-k`）
+
+主路径是浏览器打开 `/auth/login` 或 `/auth/register`。下面只给脚本/自测用的 JSON：
 
 ```sh
 cd platform/deploy
@@ -273,6 +464,188 @@ curl -sk -b cookies-a.txt https://app.localhost/me
 
 Windows `cmd` 把 JSON 里的引号写成 `\"` 即可。
 
+## Admin 管理面（板块 K）
+
+第一个注册用户是 `role=admin`。登录后打开：
+
+```
+https://$APP_HOST/admin
+```
+
+本机即 `https://app.localhost/admin`。这是控制面 HTML + JSON，**不进 dsh**。根路径 `/` 仍反代该用户 Agent UI。不要占 `/api`。
+
+| 谁 | `GET /admin` 或 `/admin/*` |
+| --- | --- |
+| 未登录 | **401** `unauthenticated` |
+| 已登录 `role=user` | **403** `forbidden` |
+| 已登录 `role=admin` | HTML 或 JSON |
+
+管理面三块（不是完整 BI）：
+
+| 路由 | 说明 |
+| --- | --- |
+| `GET /admin` | 极简页：用户 / 站点 / 运行时 / 官方插件组合 / 最近审计 |
+| `GET /admin/users` | 列表：`id`、`username`、`role`、`status`、`created_at`、`credentials`（`configured` / `missing`） |
+| `POST /admin/invites` | `{ code? }` 生成或指定邀请码 |
+| `POST /admin/users/disable` | `{ userId }` → `status=disabled`，并 `POST` runtime-manager `/stop` |
+| `POST /admin/users/reset-password` | `{ userId, password }` 可选；只写 hash，响应不含明文 |
+| `GET /admin/sites` | 全部站：`slug`、owner username、`status`、`url` |
+| `POST /admin/sites/takedown` | `{ siteId }` 任意站（复用 G 的 takedown） |
+| `GET /admin/runtimes` | 调 manager `GET /list`（`dsh-runtime-*` 的 running/exited） |
+| `POST /admin/runtimes/stop` | `{ userId }` → manager `POST /stop`（internal Bearer） |
+| `GET /admin/audit` | 最近 `audit_log` 行（`?limit=`，默认 50，最大 100）；meta 里 token 类字段打码 |
+| `POST /admin/plugin-presets` | `{ name, pluginIds }` 增加官方组合（只允许 web-app `cordis.patch.yml` 里的 id；含路径/JS/URL → **400**） |
+
+管理员**不能**看见用户的 `DEEPSEEK_API_KEY` / `.credentials.yaml` 内容。`credentials` 只看该用户 `home/.credentials.yaml` 是否存在且非空（`lstat` 大小），**不会**把文件读进响应。没有「看 Key」。
+
+封禁、下线、停运行时、发邀请写入 `audit_log`（`actor_id`、`action`、`target`、`meta` jsonb、`created_at`）。登录失败可记，**不记密码**。控制面不挂 `docker.sock`；停容器只打 runtime-manager。
+
+```sh
+# 未登录
+curl -sk -D - https://app.localhost/admin
+# HTTP/1.1 401
+# {"error":"unauthenticated"}
+
+# 普通用户 cookie
+curl -sk -b cookies-user.txt -D - https://app.localhost/admin/users
+# HTTP/1.1 403
+# {"error":"forbidden"}
+
+# 管理员
+curl -sk -b cookies-admin.txt https://app.localhost/admin/users
+curl -sk -b cookies-admin.txt -H "content-type: application/json" \
+  -d '{"code":"second-invite"}' https://app.localhost/admin/invites
+curl -sk -b cookies-admin.txt -H "content-type: application/json" \
+  -d '{"userId":"<uuid>"}' https://app.localhost/admin/users/disable
+curl -sk -b cookies-admin.txt https://app.localhost/admin/sites
+curl -sk -b cookies-admin.txt -H "content-type: application/json" \
+  -d '{"siteId":"<uuid>"}' https://app.localhost/admin/sites/takedown
+curl -sk -b cookies-admin.txt https://app.localhost/admin/runtimes
+curl -sk -b cookies-admin.txt -H "content-type: application/json" \
+  -d '{"userId":"<uuid>"}' https://app.localhost/admin/runtimes/stop
+curl -sk -b cookies-admin.txt https://app.localhost/admin/audit?limit=50
+
+# / 仍是 dsh；/admin 是控制面
+curl -sk -b cookies-admin.txt -D - https://app.localhost/admin
+# HTML：管理面
+curl -sk -b cookies-admin.txt -D - https://app.localhost/
+# dsh Web
+```
+
+进程内验收（无 Docker / 无库）：
+
+```sh
+node platform/scripts/k-admin-selftest.js
+node platform/scripts/l-ops-selftest.js
+```
+
+## 日志与备份（板块 L）
+
+4C/8G 机器**不要**上 Prometheus / Grafana / Loki / ELK。没有新的常驻服务，compose **不为 L 加容器**。看日志用 Docker 自带的：
+
+```sh
+cd platform/deploy
+docker compose logs --tail=200 control-plane
+docker compose logs --tail=200 runtime-manager
+docker compose logs --tail=200 pages
+```
+
+control-plane、runtime-manager、pages 各打**一行 JSON**（`method`、`path`、`status`、`ms`，登录后可有 `userId`）。错误栈可以打，但会先脱敏。
+
+**禁止**在日志里搜或打印：密码、Cookie 值、Authorization / Bearer、`SESSION_SECRET`、`PLATFORM_TOKEN`、KV `writeToken`、`.credentials.yaml` 内容、`DNS_API_TOKEN`、`POSTGRES_PASSWORD`。不要在日志里搜用户 API Key。
+
+管理员只读最近审计：
+
+```sh
+# 未登录 → 401；普通用户 → 403
+curl -sk -D - https://app.localhost/admin/audit
+curl -sk -b cookies-user.txt -D - https://app.localhost/admin/audit
+# 管理员
+curl -sk -b cookies-admin.txt https://app.localhost/admin/audit?limit=50
+```
+
+仍用板块 K 的 `audit_log` 表，没有另搞一套。
+
+### Postgres 备份
+
+脚本对容器 `dsh-postgres` 做 `docker exec` + `pg_dump`，默认写到 `/data/backups`（可改第一个参数）。**不要把备份写进 git**，**不要删 `/data`**。
+
+```sh
+# 默认 /data/backups
+sh platform/scripts/backup-postgres.sh
+
+# 指定目录
+sh platform/scripts/backup-postgres.sh /data/backups
+```
+
+每天凌晨（宿主机 cron 示例）：
+
+```
+15 3 * * * root /opt/Deepseek_Harness/platform/scripts/backup-postgres.sh /data/backups
+```
+
+这只备份数据库。**用户卷 `/data/users` 与快照 `/data/snapshots` 需另行复制**（例如 `rsync -a /data/users /data/snapshots /mnt/backup/dsh/`）。Caddy 证书在 `/data/caddy`。
+
+进程内验收（无 Docker / 无库）：
+
+```sh
+node platform/scripts/l-ops-selftest.js
+```
+
+## 官方插件组合（板块 J，第一期）
+
+登录用户可以把**官方插件 id 组合包**一键套用到**自己的** `$DSH_HOME/cordis.patch.yml`（即 `{DATA_ROOT}/users/{id}/home/cordis.patch.yml`）。只写 `disabled: true/false` 切换官方行，并保留 `platform-publish-site` insert。
+
+**自写插件不会上架。** 包里若含路径 / JS / URL（指向用户文件或任意入口），**400** `unofficial_plugin`。套用 A **不会**改 B 的 home，也不会把 A 的 JS 拷进别人的运行时。ensure 仍然**不覆盖**已有用户 patch。本步**不重编** `dsh-runtime:web`（只改用户卷 yaml）。控制面不挂 `docker.sock`；若该用户容器当时在跑，套用后对 runtime-manager 做 stop + ensure。
+
+白名单来自 `deepseek-harness/packages/bundle/web-app/cordis.patch.yml` 的 `id`（例如 `hmr`）。种子两条：`默认 Web`（无额外 disabled）与 `关闭 hmr`。
+
+| 路由 | 登录 | 说明 |
+| --- | --- | --- |
+| `GET /plugins` | 是 | 极简套用页；未登录 **401**；**不进 dsh** |
+| `GET /plugins/presets` | 是 | `{ presets: [{ id, name, pluginIds }] }` |
+| `POST /plugins/apply` | 是 | `{ presetId }` → 只写当前用户 home，然后视情况重启其 runtime |
+| `GET /plugins/me` | 是 | `{ exists, parsed, disabledOfficialIds? }`。解析失败只返回文件是否存在，**不把 yaml 打出来** |
+| `POST /admin/plugin-presets` | 是（admin） | `{ name, pluginIds }`；表 `plugin_presets`（IF NOT EXISTS） |
+
+`/plugins` 与 `/plugins/*` 已加入 `isReservedControlPath`。不要占 `/api`。
+
+```sh
+# 未登录：401
+curl -sk -D - https://app.localhost/plugins
+curl -sk -D - https://app.localhost/plugins/presets
+# HTTP/1.1 401
+# {"error":"unauthenticated"}
+
+# 列出可套用组合
+curl -sk -b cookies-a.txt https://app.localhost/plugins/presets
+
+# 套用到当前用户自己的 home（A 的 cookie 改不了 B）
+curl -sk -b cookies-a.txt -H "content-type: application/json" \
+  -d '{"presetId":"<uuid-关闭-hmr>"}' \
+  https://app.localhost/plugins/apply
+
+# 看自己 overlay 里 disabled 的官方 id（不会回整份 yaml）
+curl -sk -b cookies-a.txt https://app.localhost/plugins/me
+
+# 管理员增加官方组合（含 ./x.js 或 URL → 400）
+curl -sk -b cookies-admin.txt -H "content-type: application/json" \
+  -d '{"name":"关闭 tool-web","pluginIds":["tool-web"]}' \
+  https://app.localhost/admin/plugin-presets
+
+# / 仍是 dsh；/plugins 是控制面页
+curl -sk -b cookies-a.txt -D - https://app.localhost/plugins
+# HTML：官方插件组合
+curl -sk -b cookies-a.txt -D - https://app.localhost/
+# dsh Web（不是 /plugins 页）
+```
+
+进程内验收（无 Docker / 无库）：
+
+```sh
+node platform/scripts/j-plugins-selftest.js
+```
+
 ## 运行时管理器（板块 C）
 
 登录用户访问 `/`、`/api` 或 `/runtime` 时，控制面用**当前会话的 `users.id`** 调 runtime-manager（不会从 URL 读别人的 id）：
@@ -282,6 +655,8 @@ Windows `cmd` 把 JSON 里的引号写成 `\"` 即可。
 3. 支持 HTTP Upgrade / WebSocket（`/api/events.mux`、`/api/events.host`）
 4. 反代不转发 `Cookie` / `Authorization`，避免用户容器拿到会话 token
 5. 发给 dsh 的 `Host` 是 `APP_HOST`（与 `--trusted-host` 一致），不是内部容器名
+
+manager 另有（同样 Bearer，仅 internal）：`GET /status/:userId`、`GET /list`（`dsh-runtime-*` 的 running/exited）、`POST /stop` `{ "userId" }`（也保留 `POST /stop/:userId`）。控制面 Admin 只打这些 HTTP，不挂 docker.sock。
 
 runtime-manager **不要对公网暴露端口**。Caddy 不反代它。Token 只在 `dsh-internal` 上 control-plane ↔ manager 使用。
 
@@ -338,7 +713,11 @@ curl -sk -b cookies-a.txt https://app.localhost/runtime
 
 ```sh
 curl -sk -D - https://app.localhost/
-# 401 HTML 登录说明
+# 302 Location: /auth/login
+
+curl -sk -D - -H "accept: application/json" https://app.localhost/
+# HTTP/1.1 401
+# {"error":"unauthenticated"}
 
 curl -sk -D - https://app.localhost/api
 # HTTP/1.1 401
@@ -355,7 +734,7 @@ docker compose exec control-plane node -e "fetch('http://runtime-manager:8080/he
 
 ## Agent UI 与自己的 Key（板块 F）
 
-1. 注册/登录（Cookie `dsh_session`）。
+1. 浏览器打开 `https://$APP_HOST/auth/login` 或 `/auth/register`（Cookie `dsh_session`）。
 2. 浏览器打开 `https://$APP_HOST/`（或 `/runtime`）。应看到 dsh Web，不是纯文本占位。
 3. 打开 **Models**，填写该用户自己的 DeepSeek API Key。配置写到该用户卷 `$DSH_HOME/.credentials.yaml`（即 `{DATA_ROOT}/users/{id}/home/.credentials.yaml`）。
 4. 平台补丁：容器环境 `DSH_TRUST_GATEWAY=1` 且请求 `Host` 已在 `--trusted-host $APP_HOST` 时，settings/credentials 不再要求 loopback。`host.pickDirectory` / `host.openPath` 仍锁 loopback。测法：`packages/client/connection/tests/node-half.host.spec.ts` 中 `lets a gateway-trusted Host reach settings/credentials but not native desktop methods`。
@@ -444,7 +823,7 @@ curl -sk -b cookies-a.txt -D - https://app.localhost/
 
 `/sites` 与 `/sites/*` 已加入 `isReservedControlPath`。未登录一律 401，**不会**进 dsh。根路径 `/` 仍反代该用户 dsh。不要占 `/api`。公网 KV 在站点域，不在 `APP_HOST`。
 
-默认 slug：`{username}-{name}`（小写，`_` → `-`）。格式 `[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?`，全局唯一。保留：`www` `api` `admin` `login` `app` `static` `pages`。
+默认 slug：`{username}-{name}`（小写，`_` → `-`）。格式 `[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?`，全局唯一。保留：`www` `api` `admin` `login` `app` `static` `pages` `health` `cloud` `minio`（避免和现有子域撞名）。
 
 必须有根目录 `index.html`。拒绝打包 `.env`、`.credentials.yaml`、`*.pem`、`*.key`。整站默认 ≤ **20MB**（`SITE_MAX_BYTES`）。保留最近 **5** 版（外加当前版）。
 
@@ -584,7 +963,7 @@ node platform/scripts/h-kv-selftest.js
 - 默认 TTL **12 小时**（`PLATFORM_TOKEN_TTL_SECONDS`，最短 60s）。每次 ensure 换新并写入 `$DSH_HOME/.platform-token`（mode **0600**）
 - 注入用户容器：`PLATFORM_TOKEN`、`PLATFORM_URL=http://control-plane:8080`（控制面已在 `dsh-runtimes`）
 - 控制面 `POST /sites/publish` 与 `GET /sites/list` 除 Cookie 外接受 `Authorization: Bearer <PLATFORM_USER_TOKEN>`，只能发布/列出该 token 绑定的 userId
-- token **不能**当登录 Cookie，不能调 `/auth`、`/files`、`/me`、rollback/takedown/token；过期作废
+- token **不能**当登录 Cookie，不能调 `/auth`、`/files`、`/me`、`/admin`、rollback/takedown/token；过期作废
 - 缺 token 从容器打 publish → **401**；KV writeToken 打 `/sites/publish` → **401**
 
 插件：`platform/agent-bridge`（Cordis），注册 `publish_site`。描述写明：**仅当用户明确要求发布网站时使用**；若组合里有 approval，发布前要人点同意。成功则把公网 URL 和（若响应里有一次性 `writeToken`）写进工具结果。
@@ -626,18 +1005,18 @@ docker load -i dsh-runtime-web.tar
 
 ### 1Panel / 双占 80/443
 
-若主机已用 1Panel（或其它面板）占了 **80/443**，不要再和本仓库 Caddy 同时 bind。本步不拆 Caddy；可先停面板的网站反代，或以后再把 Caddy 换成面板证书。记下即可。
-
-用 1Panel 代替本仓库 Caddy 时：`APP_HOST` 反代到 `control-plane:8080`；`PAGES_HOST` 与通配 **`*.pages`（即 `*.PAGES_PARENT`）** 反代到 **`pages:8080`**。不要把 pages 或用户容器的端口 publish 到宿主机。pages 域不要转发 Cookie。
+生产机走上面的 **1Panel 生产**：OpenResty 占 80/443，Compose 用 `docker-compose.1panel.yml`（环回 18080/18081，Caddy 默认不启）。不要和本仓库 Caddy 同时 bind 80/443。不要把用户容器 3080 publish 到宿主机。www 必须透传 WebSocket（`Upgrade` / `Connection`），Host 保持 `www.996-code.com`。pages 域不要转发 Cookie（见 `platform/deploy/openresty.1panel.conf`）。
 
 ### 验收（Docker 可用时）
 
 ```sh
 docker compose -f platform/deploy/docker-compose.yml --env-file platform/deploy/.env.example config
+docker compose -f platform/deploy/docker-compose.yml -f platform/deploy/docker-compose.1panel.yml \
+  --env-file platform/deploy/.env.example config
 ```
 
 - 登录后打开 `APP_HOST` 根路径（或 `/runtime`）是 **dsh Web UI**，不是 `dsh-runtime-skeleton` 纯文本
-- 未登录打 `/` 或 `/api` **不能**进别人的 Agent（401 HTML 或 JSON）
+- 未登录打 `/` → **302** `/auth/login`（`Accept` 含 json 或 `/api` → **401** JSON），**不能**进别人的 Agent
 - 未登录 `/sites` → **401**；`/` 仍是 dsh，`/sites` 不进 dsh
 - 登录后发布含 `index.html` 的 `sites/demo`，pages 按 Host 读快照 HTML；改 workspace 不影响已发布快照
 - 发布 `../home` 或源里混进 `.env` → **400**；A 不能发布/下线 B 的站；pages 响应无 `Set-Cookie`
@@ -667,18 +1046,34 @@ docker inspect dsh-runtime-<id> --format "{{json .HostConfig.PortBindings}}"
 
 ```sh
 node --check platform/control-plane/src/server.js
+node --check platform/control-plane/src/auth-pages.js
 node --check platform/control-plane/src/files.js
 node --check platform/control-plane/src/sites.js
+node --check platform/control-plane/src/admin.js
+node --check platform/control-plane/src/audit.js
+node --check platform/control-plane/src/log.js
+node --check platform/control-plane/src/paths.js
 node --check platform/control-plane/src/platform-token.js
 node --check platform/control-plane/src/platform-auth.js
 node --check platform/control-plane/src/runtime.js
+node --check platform/control-plane/src/plugins.js
+node --check platform/control-plane/src/official-plugins.js
+node --check platform/control-plane/src/plugin-patch.js
 node --check platform/pages/src/server.js
 node --check platform/pages/src/serve.js
 node --check platform/pages/src/kv.js
+node --check platform/pages/src/log.js
 node --check platform/runtime-manager/src/server.js
 node --check platform/runtime-manager/src/runtimes.js
+node --check platform/runtime-manager/src/log.js
 node --check platform/agent-bridge/index.js
 node platform/scripts/h-kv-selftest.js
 node platform/scripts/i-publish-selftest.js
+node platform/scripts/k-admin-selftest.js
+node platform/scripts/l-ops-selftest.js
+node platform/scripts/j-plugins-selftest.js
+node platform/scripts/auth-ui-selftest.js
 docker compose -f platform/deploy/docker-compose.yml --env-file platform/deploy/.env.example config
+docker compose -f platform/deploy/docker-compose.yml -f platform/deploy/docker-compose.1panel.yml \
+  --env-file platform/deploy/.env.example config
 ```

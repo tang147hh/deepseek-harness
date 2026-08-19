@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    form, .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .75rem 0; }
+    input[type=text], input[type=password] { min-width: 12rem; }
+    .muted { color: #555; }
+    .err { color: #a40000; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>登录</h1>
+  <p class="muted">登录后打开本站根路径即可使用 Agent UI。未登录不会代理到任何人的 dsh。</p>
+  <p><a href="/auth/register">注册</a></p>
+  <form id="login">
+    <label>username <input type="text" name="username" required autocomplete="username"></label>
+    <label>password <input type="password" name="password" required autocomplete="current-password"></label>
+    <button type="submit">登录</button>
+  </form>
+  <p id="err" class="err"></p>
+  <script>
+    const errEl = document.getElementById("err");
+    function showErr(t) { errEl.textContent = t || ""; }
+    document.getElementById("login").onsubmit = async (ev) => {
+      ev.preventDefault();
+      showErr("");
+      const fd = new FormData(ev.target);
+      const res = await fetch("/auth/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: fd.get("username"),
+          password: fd.get("password"),
+        }),
+      });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      location = "/";
+    };
+  </script>
+</body>
+</html>

@@ -1,11 +1,13 @@
 name: dsh-platform
 
-# Plate A + B + C + F + D + G + H + I (identity + per-user dsh web + workspace
-# files + published snapshots + public site JSON KV + Agent publish_site).
+# Plate A + B + C + F + D + G + H + I + K + L + J (identity + per-user dsh web +
+# workspace files + published snapshots + public site JSON KV + Agent
+# publish_site + admin + logs/backup + official plugin preset packages).
 # User dsh containers are NOT long-running compose services — runtime-manager
 # creates them on `runtimes` as dsh-runtime-{userId}. Never set
 # DEEPSEEK_API_KEY. Never privileged. docker.sock is mounted only on
 # runtime-manager (read-only). Reverse proxy does not forward Cookie into dsh.
+# 1Panel (OpenResty on 80/443): also use docker-compose.1panel.yml; do not start caddy.
 
 services:
   caddy:

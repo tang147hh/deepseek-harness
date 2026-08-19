@@ -17,11 +17,16 @@ const {
   sessionCookie,
   clearSessionCookie,
   sendText,
-  sendHtml,
   sendJson,
   readJson,
   publicUser,
 } = require("./http");
+const {
+  isPublic,
+  sendUnauthenticated,
+  sendLogoutRedirect,
+  handleAuthGetPages,
+} = require("./auth-pages");
 const {
   handleRuntimeRequest,
   runtimeStatus,
@@ -31,6 +36,11 @@ const {
 } = require("./runtime");
 const { isFilesPath, handleFilesRequest } = require("./files");
 const { isSitesPath, handleSitesRequest } = require("./sites");
+const { isPluginsPath, handlePluginsRequest } = require("./plugins");
+const { isAdminPath, isAuthPath, isReservedControlPath, isRuntimeAlias } = require("./paths");
+const { handleAdminRequest } = require("./admin");
+const { writeAudit } = require("./audit");
+const { attachRequestLog, logError } = require("./log");
 const { tryPlatformUser } = require("./platform-auth");
 const { warnIfNoPlatformTokenSecret } = require("./platform-token");
 
@@ -43,57 +53,15 @@ const pool = createPool();
 // Plate F: after login, / /api /assets and WebSockets proxy to this user's
 // dsh-runtime-{id}:3080 (no prefix strip). /runtime is an alias that strips
 // /runtime. Reserved: /healthz /auth/* /me /runtime/status /files /files/*
-// /sites /sites/* (list, publish, rollback, takedown, token). Agent
+// /sites /sites/* /plugins /plugins/* /admin /admin/*. Agent
 // PLATFORM_USER_TOKEN may call POST /sites/publish and GET /sites/list only
-// (Bearer; not a login cookie; not /auth or /files). /files and /sites must
-// stay reserved or F's proxy swallows them into dsh. Public KV is on the
-// pages host (/v1/kv), not APP_HOST. Never expose dsh to anonymous callers.
-// Do not occupy /api. Do not set DEEPSEEK_API_KEY.
-
-const LOGIN_HINT = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in</title>
-</head>
-<body>
-  <h1>DeepSeek Harness</h1>
-  <p>登录后打开本站根路径即可使用 Agent UI。未登录不会代理到任何人的 dsh。</p>
-  <p>用 JSON 调用 <code>POST /auth/login</code> 或 <code>POST /auth/register</code>（需要邀请码），再刷新 <code>/</code>。</p>
-</body>
-</html>
-`;
-
-function isPublic(method, pathname) {
-  if (method === "GET" && pathname === "/healthz") {
-    return true;
-  }
-  if (method === "POST" && (pathname === "/auth/login" || pathname === "/auth/register")) {
-    return true;
-  }
-  return false;
-}
-
-function isAuthPath(pathname) {
-  return pathname === "/auth/login"
-    || pathname === "/auth/register"
-    || pathname === "/auth/logout"
-    || pathname.startsWith("/auth/");
-}
-
-function isReservedControlPath(pathname) {
-  return pathname === "/healthz"
-    || pathname === "/me"
-    || pathname === "/runtime/status"
-    || isAuthPath(pathname)
-    || isFilesPath(pathname)
-    || isSitesPath(pathname);
-}
-
-function isRuntimeAlias(pathname) {
-  return pathname === "/runtime" || pathname.startsWith("/runtime/");
-}
+// (Bearer; not a login cookie; not /auth, /files, /plugins, or /admin).
+// GET /auth/login and GET /auth/register are public HTML; POST JSON APIs
+// unchanged. Unauthenticated GET / → 302 /auth/login (Accept json → 401 JSON).
+// /files /sites /plugins /admin must stay reserved or F's proxy swallows
+// them into dsh. Public KV is on the pages host (/v1/kv), not APP_HOST.
+// Never expose dsh to anonymous callers. Do not occupy /api. Do not set
+// DEEPSEEK_API_KEY. Official presets only write this user's home yaml.
 
 async function ensureUserDirs(userId) {
   const home = path.join(usersRoot, userId, "home");
@@ -107,17 +75,10 @@ async function withSessionCookie(res, status, body, userId) {
   sendJson(res, status, body, { "set-cookie": sessionCookie(token, maxAge) });
 }
 
-function sendUnauthenticated(req, res, pathname) {
-  if ((req.method ?? "GET") === "GET" && pathname === "/") {
-    sendHtml(res, 401, LOGIN_HINT);
-    return;
-  }
-  sendJson(res, 401, { error: "unauthenticated" });
-}
-
 async function handle(req, res) {
   const method = req.method ?? "GET";
   const pathname = normalizePath(req.url);
+  const logCtx = attachRequestLog(req, res, { svc: "control-plane" });
 
   if (method === "GET" && pathname === "/healthz") {
     sendText(res, 200, "ok\n");
@@ -129,7 +90,7 @@ async function handle(req, res) {
   try {
     session = await loadSessionUser(pool, req);
   } catch (err) {
-    process.stderr.write(`session lookup failed: ${err.message}\n`);
+    logError(err, { svc: "control-plane", method, path: pathname });
     sendJson(res, 500, { error: "internal" });
     return;
   }
@@ -142,10 +103,14 @@ async function handle(req, res) {
         platformOnly = true;
       }
     } catch (err) {
-      process.stderr.write(`platform token lookup failed: ${err.message}\n`);
+      logError(err, { svc: "control-plane", method, path: pathname });
       sendJson(res, 500, { error: "internal" });
       return;
     }
+  }
+
+  if (session && session.user) {
+    logCtx.userId = session.user.id;
   }
 
   if (!isPublic(method, pathname) && !session) {
@@ -169,25 +134,52 @@ async function handle(req, res) {
       try {
         await ensureUserDirs(user.id);
       } catch (err) {
-        process.stderr.write(`mkdir users/${user.id} failed: ${err.message}\n`);
+        logError(err, { svc: "control-plane", method, path: pathname, userId: user.id });
       }
+      logCtx.userId = user.id;
       await withSessionCookie(res, 201, publicUser(user), user.id);
       return;
     }
 
     if (method === "POST" && pathname === "/auth/login") {
       const body = await readJson(req);
-      const user = await authenticateUser(pool, {
-        username: body.username,
-        password: body.password,
-      });
-      await withSessionCookie(res, 200, publicUser(user), user.id);
+      try {
+        const user = await authenticateUser(pool, {
+          username: body.username,
+          password: body.password,
+        });
+        logCtx.userId = user.id;
+        await withSessionCookie(res, 200, publicUser(user), user.id);
+      } catch (err) {
+        if (err && (err.code === "invalid_credentials" || err.status === 401)) {
+          const who = typeof body.username === "string" ? body.username : "";
+          await writeAudit(pool, {
+            actorId: null,
+            action: "login_failed",
+            target: who,
+            meta: { reason: "invalid_credentials" },
+          });
+        }
+        throw err;
+      }
+      return;
+    }
+
+    if (method === "GET" && pathname === "/auth/logout") {
+      if (session && session.token) {
+        await revokeSession(pool, session.token);
+      }
+      sendLogoutRedirect(res);
       return;
     }
 
     if (method === "POST" && pathname === "/auth/logout") {
       await revokeSession(pool, session.token);
       sendJson(res, 200, { ok: true }, { "set-cookie": clearSessionCookie() });
+      return;
+    }
+
+    if (handleAuthGetPages(req, res, session)) {
       return;
     }
 
@@ -229,6 +221,20 @@ async function handle(req, res) {
       return;
     }
 
+    if (isPluginsPath(pathname)) {
+      await handlePluginsRequest(req, res, pool, session.user, usersRoot);
+      return;
+    }
+
+    if (isAdminPath(pathname)) {
+      if (session.user.role !== "admin") {
+        sendJson(res, 403, { error: "forbidden" });
+        return;
+      }
+      await handleAdminRequest(req, res, pool, session.user, usersRoot);
+      return;
+    }
+
     if (
       pathname === "/auth/register"
       || pathname === "/auth/login"
@@ -254,14 +260,14 @@ async function handle(req, res) {
       sendJson(res, err.status, { error: err.code || "error" });
       return;
     }
-    process.stderr.write(`request failed ${method} ${pathname}: ${err.stack || err.message}\n`);
+    logError(err, { svc: "control-plane", method, path: pathname, userId: logCtx.userId });
     sendJson(res, 500, { error: "internal" });
   }
 }
 
 const server = http.createServer((req, res) => {
   handle(req, res).catch((err) => {
-    process.stderr.write(`unhandled request error: ${err.stack || err.message}\n`);
+    logError(err, { svc: "control-plane", method: req.method, path: normalizePath(req.url) });
     if (!res.headersSent) {
       sendJson(res, 500, { error: "internal" });
     }
@@ -272,7 +278,7 @@ server.headersTimeout = 60_000;
 
 server.on("upgrade", (req, socket, head) => {
   handleUpgrade(req, socket, head).catch((err) => {
-    process.stderr.write(`upgrade failed: ${err.stack || err.message}\n`);
+    logError(err, { svc: "control-plane", method: "UPGRADE", path: normalizePath(req.url) });
     try {
       writeSocketHead(
         socket,
@@ -300,7 +306,7 @@ async function handleUpgrade(req, socket, head) {
   try {
     session = await loadSessionUser(pool, req);
   } catch (err) {
-    process.stderr.write(`session lookup failed: ${err.message}\n`);
+    logError(err, { svc: "control-plane", method: "UPGRADE", path: pathname });
     writeSocketHead(
       socket,
       500,
@@ -377,6 +383,6 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 main().catch((err) => {
-  process.stderr.write(`control-plane failed to start: ${err.stack || err.message}\n`);
+  logError(err, { svc: "control-plane", path: "startup" });
   process.exit(1);
 });

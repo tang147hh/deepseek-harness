@@ -107,6 +107,57 @@ async function runtimeStatus(userId) {
   return managerFetch(`/status/${encodeURIComponent(userId)}`);
 }
 
+async function stopRuntime(userId) {
+  return managerFetch("/stop", { method: "POST", body: { userId } });
+}
+
+/**
+ * If this user's container is running, stop then ensure so a home overlay
+ * (cordis.patch.yml) is picked up. Missing/exited: leave it; next GET / ensures.
+ * Control-plane never talks to docker.sock.
+ */
+async function restartRuntimeIfRunning(userId) {
+  let st;
+  try {
+    st = await runtimeStatus(userId);
+  } catch (err) {
+    return {
+      attempted: true,
+      restarted: false,
+      error: err.code || "runtime_status_failed",
+    };
+  }
+  if (!st.running) {
+    return { attempted: false, restarted: false, name: st.name, status: st.status, running: false };
+  }
+  try {
+    await stopRuntime(userId);
+  } catch (err) {
+    return {
+      attempted: true,
+      restarted: false,
+      error: err.code || "runtime_stop_failed",
+      name: st.name,
+      status: st.status,
+    };
+  }
+  try {
+    const ensured = await ensureRuntime(userId);
+    return { attempted: true, restarted: true, ...ensured };
+  } catch (err) {
+    return {
+      attempted: true,
+      restarted: false,
+      stopped: true,
+      error: err.code || "runtime_ensure_failed",
+    };
+  }
+}
+
+async function listRuntimes() {
+  return managerFetch("/list");
+}
+
 function outboundHeaders(req, userId, { upgrade = false } = {}) {
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
@@ -279,6 +330,9 @@ module.exports = {
   rewriteRuntimeUrl,
   ensureRuntime,
   runtimeStatus,
+  stopRuntime,
+  restartRuntimeIfRunning,
+  listRuntimes,
   handleRuntimeRequest,
   proxyUpgrade,
   writeSocketHead,

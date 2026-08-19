@@ -1,8 +1,8 @@
 {
   "name": "dsh-control-plane",
   "private": true,
-  "version": "0.7.0",
-  "description": "DeepSeek Harness platform control-plane (identity + runtime gateway + workspace files + site publish + Agent Bearer publish)",
+  "version": "0.8.0",
+  "description": "DeepSeek Harness platform control-plane (identity + runtime gateway + workspace files + site publish + official plugin presets)",
   "type": "commonjs",
   "engines": {
     "node": ">=22"

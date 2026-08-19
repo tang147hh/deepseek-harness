@@ -3,6 +3,7 @@
 const http = require("node:http");
 const { Pool } = require("pg");
 const { handlePagesRequest } = require("./serve");
+const { attachRequestLog, logError, pathOnly } = require("./log");
 
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -22,8 +23,9 @@ const pool = new Pool({
 });
 
 const server = http.createServer((req, res) => {
+  attachRequestLog(req, res, { svc: "pages" });
   handlePagesRequest(req, res, { snapshotsRoot, pagesParent, pagesHost, pool }).catch((err) => {
-    process.stderr.write(`pages request failed: ${err.stack || err.message}\n`);
+    logError(err, { svc: "pages", method: req.method, path: pathOnly(req.url) });
     if (!res.headersSent) {
       res.writeHead(500, {
         "content-type": "text/plain; charset=utf-8",

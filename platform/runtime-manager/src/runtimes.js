@@ -521,6 +521,30 @@ function stop(userId) {
   return mutex.run(() => stopUnlocked(userId));
 }
 
+function summarizeListed(row) {
+  const names = (row.Names || []).map((n) => String(n).replace(/^\//, ""));
+  const name = names.find((n) => n.startsWith("dsh-runtime-")) || names[0] || "";
+  const userId = row.Labels?.[LABEL_USER] || "";
+  const status = row.State || "unknown";
+  return {
+    name,
+    userId,
+    status,
+    running: status === "running",
+  };
+}
+
+async function listUnlocked() {
+  const list = await listManaged();
+  return list
+    .map(summarizeListed)
+    .filter((row) => row.name.startsWith("dsh-runtime-"));
+}
+
+function list() {
+  return mutex.run(() => listUnlocked());
+}
+
 async function sweepIdleUnlocked() {
   const list = await listManaged();
   const now = Date.now();
@@ -621,6 +645,8 @@ module.exports = {
   ensure,
   status,
   stop,
+  list,
+  summarizeListed,
   sweepIdle,
   assertReady,
   limits,
