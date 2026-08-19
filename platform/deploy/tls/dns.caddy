@@ -1,0 +1,6 @@
+# Wildcard certificates require DNS-01. The Caddy image must include the
+# matching DNS module (see Dockerfile.caddy). Set DNS_API_TOKEN in .env.
+# Change `cloudflare` if the zone uses another provider.
+tls {
+	dns cloudflare {env.DNS_API_TOKEN}
+}

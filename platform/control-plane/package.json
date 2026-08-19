@@ -1,0 +1,17 @@
+{
+  "name": "dsh-control-plane",
+  "private": true,
+  "version": "0.7.0",
+  "description": "DeepSeek Harness platform control-plane (identity + runtime gateway + workspace files + site publish + Agent Bearer publish)",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "pg": "^8.16.3"
+  }
+}

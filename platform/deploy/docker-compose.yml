@@ -1,0 +1,217 @@
+name: dsh-platform
+
+# Plate A + B + C + F + D + G + H + I (identity + per-user dsh web + workspace
+# files + published snapshots + public site JSON KV + Agent publish_site).
+# User dsh containers are NOT long-running compose services — runtime-manager
+# creates them on `runtimes` as dsh-runtime-{userId}. Never set
+# DEEPSEEK_API_KEY. Never privileged. docker.sock is mounted only on
+# runtime-manager (read-only). Reverse proxy does not forward Cookie into dsh.
+
+services:
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.10-alpine}
+    container_name: dsh-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_HOST: ${APP_HOST:-app.localhost}
+      PAGES_HOST: ${PAGES_HOST:-pages.localhost}
+      PAGES_PARENT: ${PAGES_PARENT:-pages.localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@localhost}
+      DNS_API_TOKEN: ${DNS_API_TOKEN:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls/${TLS_MODE:-internal}.caddy:/etc/caddy/tls-policy.caddy:ro
+      - ${DATA_ROOT:-./data}/caddy:/data
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      pages:
+        condition: service_started
+    networks:
+      - edge
+      - internal
+      - runtimes
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dsh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dsh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsh}
+      POSTGRES_DB: ${POSTGRES_DB:-dsh}
+    volumes:
+      - ${DATA_ROOT:-./data}/postgres:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dsh} -d ${POSTGRES_DB:-dsh}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control
+    image: dsh-control-plane:skeleton
+    container_name: dsh-control-plane
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-dsh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsh}
+      POSTGRES_DB: ${POSTGRES_DB:-dsh}
+      APP_HOST: ${APP_HOST:-app.localhost}
+      PAGES_HOST: ${PAGES_HOST:-pages.localhost}
+      PAGES_PARENT: ${PAGES_PARENT:-pages.localhost}
+      USERS_ROOT: /data/users
+      SNAPSHOTS_ROOT: /data/snapshots
+      FILE_MAX_BYTES: ${FILE_MAX_BYTES:-20971520}
+      SITE_MAX_BYTES: ${SITE_MAX_BYTES:-20971520}
+      FILE_QUOTA_BYTES: ${FILE_QUOTA_BYTES:-524288000}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-to-a-long-random-string}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
+      PLATFORM_TOKEN_SECRET: ${PLATFORM_TOKEN_SECRET:-change-me-platform-token-secret}
+      BOOTSTRAP_INVITE_CODE: ${BOOTSTRAP_INVITE_CODE:-}
+      RUNTIME_MANAGER_URL: http://runtime-manager:8080
+      RUNTIME_MANAGER_TOKEN: ${RUNTIME_MANAGER_TOKEN:-change-me-runtime-manager-token}
+    volumes:
+      - ${DATA_ROOT:-./data}/users:/data/users
+      - ${DATA_ROOT:-./data}/snapshots:/data/snapshots
+    depends_on:
+      postgres:
+        condition: service_healthy
+      runtime-manager:
+        condition: service_healthy
+    networks:
+      - internal
+      - runtimes
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  pages:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.pages
+    image: dsh-pages:skeleton
+    container_name: dsh-pages
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      SNAPSHOTS_ROOT: /data/snapshots
+      PAGES_HOST: ${PAGES_HOST:-pages.localhost}
+      PAGES_PARENT: ${PAGES_PARENT:-pages.localhost}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-dsh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsh}
+      POSTGRES_DB: ${POSTGRES_DB:-dsh}
+      KV_VALUE_MAX_BYTES: ${KV_VALUE_MAX_BYTES:-65536}
+      KV_SITE_MAX_BYTES: ${KV_SITE_MAX_BYTES:-1048576}
+      KV_WRITE_PER_MINUTE: ${KV_WRITE_PER_MINUTE:-30}
+      # Phase 1: same dsh role as control-plane. Do not inject SESSION_SECRET.
+    volumes:
+      - ${DATA_ROOT:-./data}/snapshots:/data/snapshots:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    expose:
+      - "8080"
+    security_opt:
+      - no-new-privileges:true
+
+  # Build dsh-runtime:web (multi-stage monorepo). One-shot (`true` then
+  # exit) — not a user runtime and not kept running. User containers are
+  # dsh-runtime-{userId} created via Docker API on `runtimes` only.
+  # Context is the repo root so Dockerfile.runtime can COPY deepseek-harness.
+  runtime-image:
+    build:
+      context: ../..
+      dockerfile: platform/deploy/Dockerfile.runtime
+    image: dsh-runtime:web
+    pull_policy: never
+    command: ["true"]
+    restart: "no"
+    network_mode: none
+    user: "node"
+    security_opt:
+      - no-new-privileges:true
+
+  runtime-manager:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.manager
+    image: dsh-runtime-manager:skeleton
+    container_name: dsh-runtime-manager
+    restart: unless-stopped
+    pull_policy: never
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      USERS_ROOT: /data/users
+      HOST_DATA_ROOT: ${HOST_DATA_ROOT:?HOST_DATA_ROOT must be an absolute path on the Docker host}
+      APP_HOST: ${APP_HOST:-app.localhost}
+      PLATFORM_URL: http://control-plane:8080
+      PLATFORM_TOKEN_SECRET: ${PLATFORM_TOKEN_SECRET:-change-me-platform-token-secret}
+      PLATFORM_TOKEN_TTL_SECONDS: ${PLATFORM_TOKEN_TTL_SECONDS:-43200}
+      RUNTIME_MANAGER_TOKEN: ${RUNTIME_MANAGER_TOKEN:-change-me-runtime-manager-token}
+      RUNTIME_IMAGE: dsh-runtime:web
+      RUNTIME_NETWORK: dsh-runtimes
+      IDLE_SECONDS: ${IDLE_SECONDS:-900}
+      MAX_RUNTIMES: ${MAX_RUNTIMES:-2}
+      RUNTIME_MEMORY: ${RUNTIME_MEMORY:-1g}
+      RUNTIME_CPUS: ${RUNTIME_CPUS:-1.0}
+      RUNTIME_READY_TIMEOUT_MS: ${RUNTIME_READY_TIMEOUT_MS:-120000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${DATA_ROOT:-./data}/users:/data/users
+    depends_on:
+      runtime-image:
+        condition: service_completed_successfully
+    networks:
+      - internal
+      - runtimes
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  edge:
+    name: dsh-edge
+    driver: bridge
+  internal:
+    name: dsh-internal
+    driver: bridge
+    internal: true
+  runtimes:
+    name: dsh-runtimes
+    driver: bridge

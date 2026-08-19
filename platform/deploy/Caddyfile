@@ -1,0 +1,20 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+}
+
+# Login / control-plane host. Session cookies (plate B) must use this exact
+# host — never the registrable parent, or they would be visible on pages.
+{$APP_HOST} {
+	import /etc/caddy/tls-policy.caddy
+	reverse_proxy control-plane:8080
+}
+
+# Public site hosts. Strip cookies both ways so an app session cannot leak
+# onto *.pages (user pages will later run arbitrary JS).
+{$PAGES_HOST}, *.{$PAGES_PARENT} {
+	import /etc/caddy/tls-policy.caddy
+	header -Set-Cookie
+	request_header -Cookie
+	reverse_proxy pages:8080
+}

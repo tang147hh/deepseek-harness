@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workspace files</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    form, .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .75rem 0; }
+    input[type=text] { min-width: 12rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ddd; text-align: left; padding: .35rem .4rem; }
+    .muted { color: #555; }
+    .err { color: #a40000; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Workspace 文件</h1>
+  <p class="muted">只读写当前登录用户的 <code>workspace</code>。不会写入 <code>home</code>（那里有 Key）。路径必须是相对 workspace 的 posix 路径。</p>
+  <p><a href="/">Agent UI</a> · <a href="/sites">发布站点</a></p>
+  <form id="up">
+    <input type="file" name="file" required>
+    <label>destDir <input type="text" name="destDir" value="." placeholder="."></label>
+    <button type="submit">上传</button>
+  </form>
+  <div class="row">
+    <label>path <input type="text" id="listPath" value="."></label>
+    <button type="button" id="refresh">列出</button>
+    <label><input type="checkbox" id="recursive"> 删除非空目录时 recursive=1</label>
+  </div>
+  <p id="status" class="muted"></p>
+  <p id="err" class="err"></p>
+  <table>
+    <thead><tr><th>name</th><th>type</th><th>size</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <script>
+    const errEl = document.getElementById("err");
+    const statusEl = document.getElementById("status");
+    const rowsEl = document.getElementById("rows");
+    const listPathEl = document.getElementById("listPath");
+
+    function joinRel(dir, name) {
+      const d = (dir || ".").replace(/\/+$/, "");
+      if (!d || d === ".") return name;
+      return d + "/" + name;
+    }
+
+    function showErr(t) { errEl.textContent = t || ""; }
+
+    async function listNow() {
+      showErr("");
+      const p = listPathEl.value || ".";
+      const res = await fetch("/files/list?path=" + encodeURIComponent(p), { credentials: "same-origin" });
+      const text = await res.text();
+      if (!res.ok) {
+        showErr(res.status + " " + text);
+        rowsEl.replaceChildren();
+        return;
+      }
+      const data = JSON.parse(text);
+      statusEl.textContent = "path = " + data.path;
+      rowsEl.replaceChildren();
+      if (data.path !== ".") {
+        const tr = document.createElement("tr");
+        const parent = data.path.includes("/") ? data.path.slice(0, data.path.lastIndexOf("/")) || "." : ".";
+        tr.innerHTML = "<td><a href=\"#\">..</a></td><td>dir</td><td></td><td></td>";
+        tr.querySelector("a").onclick = (e) => { e.preventDefault(); listPathEl.value = parent; listNow(); };
+        rowsEl.appendChild(tr);
+      }
+      for (const e of data.entries || []) {
+        const tr = document.createElement("tr");
+        const full = joinRel(data.path, e.name);
+        const nameTd = document.createElement("td");
+        if (e.type === "dir") {
+          const a = document.createElement("a");
+          a.href = "#";
+          a.textContent = e.name;
+          a.onclick = (ev) => { ev.preventDefault(); listPathEl.value = full; listNow(); };
+          nameTd.appendChild(a);
+        } else {
+          const a = document.createElement("a");
+          a.href = "/files/download?path=" + encodeURIComponent(full);
+          a.textContent = e.name;
+          nameTd.appendChild(a);
+        }
+        const typeTd = document.createElement("td");
+        typeTd.textContent = e.type;
+        const sizeTd = document.createElement("td");
+        sizeTd.textContent = e.type === "file" ? String(e.size) : "";
+        const actTd = document.createElement("td");
+        const del = document.createElement("button");
+        del.type = "button";
+        del.textContent = "删除";
+        del.onclick = () => delPath(full, e.type === "dir");
+        actTd.appendChild(del);
+        tr.append(nameTd, typeTd, sizeTd, actTd);
+        rowsEl.appendChild(tr);
+      }
+    }
+
+    async function delPath(p, isDir) {
+      showErr("");
+      let url = "/files?path=" + encodeURIComponent(p);
+      if (isDir && document.getElementById("recursive").checked) url += "&recursive=1";
+      const res = await fetch(url, { method: "DELETE", credentials: "same-origin" });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      listNow();
+    }
+
+    document.getElementById("refresh").onclick = () => listNow();
+    document.getElementById("up").onsubmit = async (ev) => {
+      ev.preventDefault();
+      showErr("");
+      const fd = new FormData(ev.target);
+      const res = await fetch("/files/upload", { method: "POST", body: fd, credentials: "same-origin" });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      listNow();
+    };
+    listNow();
+  </script>
+</body>
+</html>

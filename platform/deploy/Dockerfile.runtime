@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+# Per-user `dsh web` image (plate F).
+# Multi-stage: compile the monorepo in `build`, copy only the built tree
+# into a slim runtime. An 8G server may OOM during `pnpm run build` —
+# build on a stronger machine, then `docker save dsh-runtime:web | docker load`
+# on the production host. Never set DEEPSEEK_API_KEY in this image.
+
+FROM node:22-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git python3 make g++ ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    CI=true \
+    NODE_OPTIONS=--max-old-space-size=4096
+
+WORKDIR /src
+COPY deepseek-harness/ ./
+
+RUN corepack enable \
+    && corepack prepare pnpm@11.7.0 --activate \
+    && pnpm install --frozen-lockfile \
+    && pnpm run build
+
+FROM node:22-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends socat ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /data/home /data/workspace \
+    && chown -R node:node /data
+
+# Built monorepo (lib/ + frontend dist + pnpm node_modules). No compiler toolchain.
+COPY --from=build --chown=node:node /src /opt/dsh
+COPY platform/deploy/runtime/start.sh /usr/local/bin/dsh-runtime-start
+RUN chmod 755 /usr/local/bin/dsh-runtime-start \
+    && chown node:node /usr/local/bin/dsh-runtime-start
+
+ENV DSH_HOME=/data/home \
+    HOME=/data/home \
+    npm_config_update_notifier=false
+
+WORKDIR /data/workspace
+USER node
+EXPOSE 3080
+
+# Plate I: Cordis publish_site plugin. LAST COPY so an 8G host can rebuild
+# this layer from cache without re-running the monorepo pnpm build.
+COPY --chown=node:node platform/agent-bridge /opt/dsh-platform/agent-bridge
+
+# No DEEPSEEK_API_KEY. Key lives in $DSH_HOME/.credentials.yaml after the
+# user fills Models (or an operator writes that file on the user volume).
+CMD ["/usr/local/bin/dsh-runtime-start"]

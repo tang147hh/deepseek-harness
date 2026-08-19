@@ -1,0 +1,14 @@
+{
+  "name": "dsh-platform-agent-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cordis plugin: model tool publish_site → control-plane POST /sites/publish",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

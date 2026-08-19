@@ -1,0 +1,16 @@
+.git
+**/.git
+**/.gitignore
+**/node_modules
+**/.turbo
+**/coverage
+**/*.tsbuildinfo
+platform/deploy/data
+platform/data
+data
+**/.env
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.crt
+**/.DS_Store

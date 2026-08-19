@@ -1,0 +1,21 @@
+FROM node:22-alpine
+
+# Orchestrator only: talks to the host Docker Engine via docker.sock.
+# Runs as root so the typical root:docker 660 socket is usable.
+# Never privileged. User dsh containers must not use this image.
+
+WORKDIR /app
+COPY runtime-manager/package.json ./
+COPY runtime-manager/src ./src
+COPY control-plane/src/platform-token.js ./src/platform-token.js
+
+ENV NODE_ENV=production \
+    HOST=0.0.0.0 \
+    PORT=8080
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:8080/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+CMD ["node", "src/server.js"]

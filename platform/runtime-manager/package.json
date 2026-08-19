@@ -1,0 +1,13 @@
+{
+  "name": "dsh-runtime-manager",
+  "private": true,
+  "version": "0.4.0",
+  "description": "DeepSeek Harness platform runtime-manager (per-user isolated containers + PLATFORM_USER_TOKEN)",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js"
+  }
+}

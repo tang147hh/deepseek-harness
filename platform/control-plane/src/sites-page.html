@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Publish sites</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 1.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    form, .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .75rem 0; }
+    input[type=text] { min-width: 12rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ddd; text-align: left; padding: .35rem .4rem; vertical-align: top; }
+    .muted { color: #555; }
+    .err { color: #a40000; white-space: pre-wrap; }
+    .ok { color: #0a5; white-space: pre-wrap; }
+    .versions { font-size: .9rem; }
+    pre { background: #f4f4f4; padding: .6rem .7rem; overflow: auto; font-size: .85rem; }
+    .warn { background: #fff6d6; border: 1px solid #e6d38a; padding: .5rem .7rem; }
+    code { font-size: .92em; }
+  </style>
+</head>
+<body>
+  <h1>发布静态站</h1>
+  <p class="muted">只打包当前用户 <code>workspace/sites/&lt;name&gt;</code> 到不可变快照。公网站点不读直播 workspace，也不带登录 Cookie。</p>
+  <p><a href="/">Agent UI</a> · <a href="/files">文件</a></p>
+  <form id="pub">
+    <label>dir <input type="text" name="dir" value="sites/demo" required></label>
+    <label>slug <input type="text" name="slug" placeholder="默认 username-name"></label>
+    <button type="submit">发布</button>
+  </form>
+  <p class="muted">必须有 <code>index.html</code>。拒绝 <code>.env</code>、<code>.credentials.yaml</code>、<code>*.pem</code>、<code>*.key</code>。整站默认 ≤ 20MB。</p>
+  <p class="warn">写令牌<strong>只显示一次</strong>（首次发布或点「轮换」）。它不是登录 session，也不能换用户 JWT。公网 KV 只在站点域：静态页用同源 <code>fetch('/v1/kv/…')</code>，不要打 APP_HOST（带不上、也不该带 app Cookie）。</p>
+  <p id="status" class="ok"></p>
+  <p id="err" class="err"></p>
+  <table>
+    <thead><tr><th>slug</th><th>status</th><th>version</th><th>url</th><th>写令牌</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <h2 style="font-size:1rem;margin-top:1.5rem">站点域 KV 示例</h2>
+  <p class="muted">在 <code>https://{slug}.{PAGES_PARENT}/</code> 打开的页面里调用（同源）。读匿名；写要 <code>Authorization: Bearer &lt;site_write_token&gt;</code>。</p>
+  <pre>fetch('/v1/kv/count')
+fetch('/v1/kv/count',{method:'PUT',headers:{Authorization:'Bearer …','content-type':'application/json'},body:'1'})</pre>
+  <script>
+    const errEl = document.getElementById("err");
+    const statusEl = document.getElementById("status");
+    const rowsEl = document.getElementById("rows");
+
+    function showErr(t) { errEl.textContent = t || ""; }
+    function showOk(t) { statusEl.textContent = t || ""; }
+
+    function showTokenOnce(writeToken, extra) {
+      const bits = [];
+      if (extra) bits.push(extra);
+      if (writeToken) {
+        bits.push("写令牌（只显示一次，请立刻复制）：" + writeToken);
+      }
+      showOk(bits.join("\n"));
+    }
+
+    async function listNow() {
+      showErr("");
+      const res = await fetch("/sites/list", { credentials: "same-origin" });
+      const text = await res.text();
+      if (!res.ok) {
+        showErr(res.status + " " + text);
+        rowsEl.replaceChildren();
+        return;
+      }
+      const data = JSON.parse(text);
+      rowsEl.replaceChildren();
+      for (const s of data.sites || []) {
+        const tr = document.createElement("tr");
+        const slugTd = document.createElement("td");
+        slugTd.textContent = s.slug;
+        const stTd = document.createElement("td");
+        stTd.textContent = s.status;
+        const verTd = document.createElement("td");
+        verTd.className = "versions";
+        const vers = (s.versions || []).map((v) => String(v.version)).join(", ");
+        verTd.textContent = (s.current_version == null ? "—" : String(s.current_version)) + (vers ? " [" + vers + "]" : "");
+        const urlTd = document.createElement("td");
+        if (s.url) {
+          const a = document.createElement("a");
+          a.href = s.url;
+          a.textContent = s.url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          urlTd.appendChild(a);
+        }
+        const tokTd = document.createElement("td");
+        tokTd.textContent = s.hasWriteToken ? "已签发（明文不回显）" : "尚未签发";
+        const rotBtn = document.createElement("button");
+        rotBtn.type = "button";
+        rotBtn.textContent = "轮换";
+        rotBtn.onclick = () => rotateToken(s.id);
+        tokTd.appendChild(document.createElement("br"));
+        tokTd.appendChild(rotBtn);
+        const actTd = document.createElement("td");
+        const rb = document.createElement("input");
+        rb.type = "text";
+        rb.placeholder = "version";
+        rb.style.width = "5rem";
+        const rbBtn = document.createElement("button");
+        rbBtn.type = "button";
+        rbBtn.textContent = "回滚";
+        rbBtn.onclick = () => rollback(s.id, rb.value);
+        const tdBtn = document.createElement("button");
+        tdBtn.type = "button";
+        tdBtn.textContent = "下线";
+        tdBtn.onclick = () => takedown(s.id);
+        actTd.append(rb, rbBtn, tdBtn);
+        tr.append(slugTd, stTd, verTd, urlTd, tokTd, actTd);
+        rowsEl.appendChild(tr);
+      }
+    }
+
+    async function rotateToken(siteId) {
+      showErr("");
+      showOk("");
+      if (!window.confirm("轮换后旧令牌立即失效，新令牌只显示这一次。继续？")) {
+        return;
+      }
+      const res = await fetch("/sites/token", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ siteId }),
+      });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      let data = {};
+      try { data = JSON.parse(text); } catch { data = {}; }
+      showTokenOnce(data.writeToken, text);
+      listNow();
+    }
+
+    async function rollback(siteId, version) {
+      showErr("");
+      showOk("");
+      const n = Number.parseInt(String(version || "").trim(), 10);
+      const res = await fetch("/sites/rollback", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ siteId, version: n }),
+      });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      showOk(text);
+      listNow();
+    }
+
+    async function takedown(siteId) {
+      showErr("");
+      showOk("");
+      const res = await fetch("/sites/takedown", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ siteId }),
+      });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      showOk(text);
+      listNow();
+    }
+
+    document.getElementById("pub").onsubmit = async (ev) => {
+      ev.preventDefault();
+      showErr("");
+      showOk("");
+      const fd = new FormData(ev.target);
+      const dir = String(fd.get("dir") || "").trim();
+      const slug = String(fd.get("slug") || "").trim();
+      const body = { dir };
+      if (slug) body.slug = slug;
+      const res = await fetch("/sites/publish", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      if (!res.ok) { showErr(res.status + " " + text); return; }
+      let data = {};
+      try { data = JSON.parse(text); } catch { data = {}; }
+      showTokenOnce(data.writeToken, text);
+      listNow();
+    };
+    listNow();
+  </script>
+</body>
+</html>

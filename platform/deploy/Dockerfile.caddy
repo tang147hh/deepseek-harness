@@ -1,0 +1,14 @@
+# Optional image for server TLS (DNS-01 wildcard certs).
+# Stock `caddy` cannot complete DNS challenges; rebuild with your DNS module.
+#
+#   docker build -t dsh-caddy:dns -f Dockerfile.caddy .
+#   CADDY_IMAGE=dsh-caddy:dns TLS_MODE=dns
+#
+# Swap the --with module to match the zone (Cloudflare, Alidns, …).
+
+FROM caddy:2-builder AS builder
+RUN xcaddy build \
+    --with github.com/caddy-dns/cloudflare
+
+FROM caddy:2-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
