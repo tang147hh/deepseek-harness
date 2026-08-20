@@ -343,6 +343,10 @@ async function main() {
       assert.equal(isReservedControlPath("/"), false);
       assert.equal(isReservedControlPath("/api"), false);
       assert.equal(isReservedControlPath("/api/events.mux"), false);
+      assert.equal(isPluginsPath("/plugins/@deepseek-ai/dsh-typert-registry/client.js"), false);
+      assert.equal(isReservedControlPath("/plugins/@deepseek-ai/dsh-typert-registry/client.js"), false);
+      assert.equal(isPluginsPath("/plugins/events"), false);
+      assert.equal(isReservedControlPath("/plugins/events"), false);
     });
 
     await check("unauthenticated /plugins/* → 401", async () => {

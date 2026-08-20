@@ -181,6 +181,8 @@ services:
       RUNTIME_MANAGER_TOKEN: ${RUNTIME_MANAGER_TOKEN:-change-me-runtime-manager-token}
       RUNTIME_IMAGE: dsh-runtime:web
       RUNTIME_NETWORK: dsh-runtimes
+      RUNTIME_UID: ${RUNTIME_UID:-1000}
+      RUNTIME_GID: ${RUNTIME_GID:-1000}
       IDLE_SECONDS: ${IDLE_SECONDS:-900}
       MAX_RUNTIMES: ${MAX_RUNTIMES:-2}
       RUNTIME_MEMORY: ${RUNTIME_MEMORY:-1g}

@@ -3,8 +3,12 @@
 const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 const docker = require("./docker");
 const { signPlatformUserToken, platformTokenSecret } = require("./platform-token");
+
+const execFileAsync = promisify(execFile);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LABEL_RUNTIME = "dsh.runtime";
@@ -235,9 +239,28 @@ function waitForTcp(host, port, timeoutMs) {
   });
 }
 
-async function ensureDirs(userId) {
-  await fs.mkdir(path.join(USERS_ROOT, userId, "home"), { recursive: true });
-  await fs.mkdir(path.join(USERS_ROOT, userId, "workspace"), { recursive: true });
+async function ensureDirs(userId, usersRoot = USERS_ROOT) {
+  const home = path.join(usersRoot, userId, "home");
+  const workspace = path.join(usersRoot, userId, "workspace");
+  await fs.mkdir(home, { recursive: true });
+  await fs.mkdir(path.join(home, "profiles"), { recursive: true });
+  await fs.mkdir(workspace, { recursive: true });
+  await chownRuntimeDirs(home, workspace);
+}
+
+async function chownRuntimeDirs(...dirs) {
+  const uid = String(process.env.RUNTIME_UID || "1000");
+  const gid = String(process.env.RUNTIME_GID || "1000");
+  for (const dir of dirs) {
+    try {
+      await execFileAsync("chown", ["-R", `${uid}:${gid}`, dir]);
+    } catch (err) {
+      if (process.platform !== "win32") {
+        throw err;
+      }
+      // Windows selftests have no chown.
+    }
+  }
 }
 
 async function writeUserPlatformFiles(userId, token, usersRoot = USERS_ROOT) {
@@ -269,6 +292,16 @@ async function writeUserPlatformFiles(userId, token, usersRoot = USERS_ROOT) {
     }
   }
   return { tokenPath, patchWritten };
+}
+
+async function prepareUserRuntimeFiles(userId, token, usersRoot = USERS_ROOT) {
+  const home = path.join(usersRoot, userId, "home");
+  const workspace = path.join(usersRoot, userId, "workspace");
+  await ensureDirs(userId, usersRoot);
+  const written = await writeUserPlatformFiles(userId, token, usersRoot);
+  // The token and optional patch are created after ensureDirs' first chown.
+  await chownRuntimeDirs(home, workspace);
+  return written;
 }
 
 function runtimeEnvList(userId, token) {
@@ -442,9 +475,8 @@ async function removeStale(inspect) {
 async function ensureUnlocked(userIdRaw) {
   const userId = assertUserId(userIdRaw);
   const name = containerName(userId);
-  await ensureDirs(userId);
   const token = signPlatformUserToken(userId);
-  await writeUserPlatformFiles(userId, token);
+  await prepareUserRuntimeFiles(userId, token);
 
   let inspect = await inspectOrNull(name);
   if (inspect && needsRecreate(inspect)) {
@@ -642,6 +674,7 @@ module.exports = {
   needsRecreate,
   runtimeEnvList,
   writeUserPlatformFiles,
+  prepareUserRuntimeFiles,
   ensure,
   status,
   stop,

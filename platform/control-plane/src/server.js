@@ -53,7 +53,7 @@ const pool = createPool();
 // Plate F: after login, / /api /assets and WebSockets proxy to this user's
 // dsh-runtime-{id}:3080 (no prefix strip). /runtime is an alias that strips
 // /runtime. Reserved: /healthz /auth/* /me /runtime/status /files /files/*
-// /sites /sites/* /plugins /plugins/* /admin /admin/*. Agent
+// /sites /sites/* /plugins /plugins/presets|/me|/apply /admin /admin/*. Agent
 // PLATFORM_USER_TOKEN may call POST /sites/publish and GET /sites/list only
 // (Bearer; not a login cookie; not /auth, /files, /plugins, or /admin).
 // GET /auth/login and GET /auth/register are public HTML; POST JSON APIs

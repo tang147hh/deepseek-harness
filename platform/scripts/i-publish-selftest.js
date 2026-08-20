@@ -29,6 +29,7 @@ const {
 } = require("../control-plane/src/platform-auth");
 const {
   writeUserPlatformFiles,
+  prepareUserRuntimeFiles,
   HOME_PATCH_CONTENTS,
   needsRecreate,
   runtimeEnvList,
@@ -308,6 +309,51 @@ async function main() {
     });
   } finally {
     fs.rmSync(homeRoot, { recursive: true, force: true });
+  }
+
+  const ownershipRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-i-ownership-"));
+  const previousUid = process.env.RUNTIME_UID;
+  const previousGid = process.env.RUNTIME_GID;
+  try {
+    await check("ensure creates profiles and recursively owns new user files", async () => {
+      if (process.platform !== "win32" && typeof process.getuid === "function") {
+        if (process.getuid() === 0) {
+          delete process.env.RUNTIME_UID;
+          delete process.env.RUNTIME_GID;
+        } else {
+          process.env.RUNTIME_UID = String(process.getuid());
+          process.env.RUNTIME_GID = String(process.getgid());
+        }
+      }
+      await prepareUserRuntimeFiles(USER_A, tokenA, ownershipRoot);
+      const home = path.join(ownershipRoot, USER_A, "home");
+      const profiles = path.join(home, "profiles");
+      const workspace = path.join(ownershipRoot, USER_A, "workspace");
+      const tokenPath = path.join(home, ".platform-token");
+      assert.equal(fs.statSync(profiles).isDirectory(), true);
+      assert.equal(fs.statSync(workspace).isDirectory(), true);
+      if (process.platform !== "win32" && typeof process.getuid === "function") {
+        const expectedUid = process.getuid() === 0 ? 1000 : process.getuid();
+        const expectedGid = process.getuid() === 0 ? 1000 : process.getgid();
+        for (const target of [home, profiles, workspace, tokenPath]) {
+          const stat = fs.statSync(target);
+          assert.equal(stat.uid, expectedUid, target);
+          assert.equal(stat.gid, expectedGid, target);
+        }
+      }
+    });
+  } finally {
+    if (previousUid === undefined) {
+      delete process.env.RUNTIME_UID;
+    } else {
+      process.env.RUNTIME_UID = previousUid;
+    }
+    if (previousGid === undefined) {
+      delete process.env.RUNTIME_GID;
+    } else {
+      process.env.RUNTIME_GID = previousGid;
+    }
+    fs.rmSync(ownershipRoot, { recursive: true, force: true });
   }
 
   await check("create Env has PLATFORM_TOKEN and PLATFORM_URL, no DEEPSEEK_API_KEY", () => {

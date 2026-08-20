@@ -30,20 +30,28 @@
     document.getElementById("register").onsubmit = async (ev) => {
       ev.preventDefault();
       showErr("");
-      const fd = new FormData(ev.target);
-      const res = await fetch("/auth/register", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          username: fd.get("username"),
-          password: fd.get("password"),
-          inviteCode: fd.get("inviteCode"),
-        }),
-      });
-      const text = await res.text();
-      if (!res.ok) { showErr(res.status + " " + text); return; }
-      location = "/";
+      const btn = ev.target.querySelector("button");
+      if (btn) btn.disabled = true;
+      try {
+        const fd = new FormData(ev.target);
+        const res = await fetch("/auth/register", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            username: fd.get("username"),
+            password: fd.get("password"),
+            inviteCode: fd.get("inviteCode"),
+          }),
+        });
+        const text = await res.text();
+        if (!res.ok) { showErr(res.status + " " + text); return; }
+        location = "/";
+      } catch (err) {
+        showErr(err && err.message ? err.message : String(err));
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     };
   </script>
 </body>

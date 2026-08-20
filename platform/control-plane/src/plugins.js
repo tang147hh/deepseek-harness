@@ -30,8 +30,17 @@ function httpError(status, code) {
   return err;
 }
 
+const CONTROL_PLUGIN_PATHS = new Set([
+  "/plugins",
+  "/plugins/presets",
+  "/plugins/me",
+  "/plugins/apply",
+]);
+
+// Only the marketplace page and its JSON APIs. dsh serves client bundles at
+// /plugins/<id>/client.js and HMR at /plugins/events — those must proxy through.
 function isPluginsPath(pathname) {
-  return pathname === "/plugins" || pathname.startsWith("/plugins/");
+  return CONTROL_PLUGIN_PATHS.has(pathname);
 }
 
 function isUuid(id) {
@@ -256,12 +265,7 @@ async function handlePluginsRequest(req, res, pool, user, usersRoot) {
     return;
   }
 
-  const known = new Set(["/plugins", "/plugins/presets", "/plugins/me", "/plugins/apply"]);
-  if (known.has(pathname)) {
-    sendJson(res, 405, { error: "method_not_allowed" });
-    return;
-  }
-  sendJson(res, 404, { error: "not_found" });
+  sendJson(res, 405, { error: "method_not_allowed" });
 }
 
 module.exports = {

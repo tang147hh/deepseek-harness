@@ -46,12 +46,11 @@ function parseCookies(req) {
 }
 
 function cookieDomain() {
-  const host = String(process.env.APP_HOST ?? "").trim();
-  // Host-only cookie if APP_HOST is missing. Never a parent like .example.com.
-  if (!host || host.startsWith(".")) {
-    return "";
-  }
-  return host;
+  // Host-only (omit Domain): works for whatever host the browser used
+  // (e.g. www.996-code.com). Never a parent like .example.com, or cookies
+  // leak onto *.pages. An explicit Domain=APP_HOST fails if .env APP_HOST
+  // does not match the public hostname.
+  return "";
 }
 
 function serializeCookie(name, value, extras) {

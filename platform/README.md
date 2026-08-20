@@ -36,7 +36,7 @@ Admin 是控制面自己的 HTML + JSON（`/admin`），不是独立 `admin-web/
 ## 架构约束
 
 - 登录域（`APP_HOST`，如 `app.example.com`）与站点域（`*.PAGES_PARENT`，如 `*.pages.example.com`）拆开，避免用户页读到登录 cookie。
-- Cookie `Domain` 只能是 `APP_HOST` 本身，**不要**写成父域（`.example.com`），否则会进 pages。
+- Cookie 不写 `Domain`（host-only，只给当前主机名）。**不要**写成父域（`.example.com` / `.996-code.com`），否则会进 pages。
 - 公网站点以后只服务**发布快照**，不挂直播工作区，不把用户容器端口映射到宿主机。
 - **全局环境禁止 `DEEPSEEK_API_KEY`**（Compose、镜像、`.env`、用户容器 Env 都不设）。Key 以后只在该用户的 `DSH_HOME`。
 - 用户容器：非 root（`USER node`）、`no-new-privileges`、不要 privileged、不要挂 `docker.sock`、不要 publish 宿主机端口。
@@ -55,8 +55,8 @@ Compose 卷可以用相对路径 `DATA_ROOT=./data`（相对 `platform/deploy`�
 | 环境 | `DATA_ROOT` | `HOST_DATA_ROOT` |
 | --- | --- | --- |
 | Linux 服务器 | `/data` | `/data` |
-| Linux 检出目录 | `./data` 或绝对路径 | `/home/you/Deepseek_Harness/platform/deploy/data` |
-| Windows（仅作配置示例） | `./data` | `C:/Deepseek_Harness/platform/deploy/data` |
+| Linux 检出目录 | `./data` 或绝对路径 | `/opt/deepseek-harness/platform/deploy/data` |
+| Windows（仅作配置示例） | `./data` | `C:/deepseek-harness/platform/deploy/data` |
 
 | 路径 | 用途 |
 | --- | --- |
@@ -66,6 +66,8 @@ Compose 卷可以用相对路径 `DATA_ROOT=./data`（相对 `platform/deploy`�
 | `{DATA_ROOT}/snapshots` | 站点发布快照（板块 G） |
 | `{DATA_ROOT}/backups` | `pg_dump` 输出（板块 L；**不要提交 git**；**不要删 `/data`**） |
 | `{DATA_ROOT}/caddy` | Caddy 证书与本地 CA |
+
+已有用户卷升级时在 Linux 宿主机一次性执行：`chown -R 1000:1000 /data/users`（若 `DATA_ROOT` 不是 `/data`，替换成实际的 users 路径）。
 
 ## 本机启动
 
@@ -197,16 +199,16 @@ docker compose up -d --build
 - `PAGES_HOST=pages.996-code.com`
 - `PAGES_PARENT=pages.996-code.com`
 
-1Panel OpenResty 占 **80/443**。Cloudflare 橙云；源站证书用 1Panel。SSL 先 **Flexible**，源站 HTTPS 好了再切 **Full**。不要装 New API / MinIO / 其它栈。`dsh-runtime:web` 已在服务器编好，**禁止** `docker compose build runtime-image`。
+代码固定在 `/opt/deepseek-harness`。1Panel OpenResty 占 **80/443**，源站证书由 1Panel 管理。Cloudflare 的 `www.996-code.com`、`pages.996-code.com` 与 `*.pages.996-code.com` 都设为**灰云（DNS only）**；尤其 `www` 不能橙云，否则 Agent 冷启动约 100 秒时会被 Cloudflare 提前超时并表现为 502。不要设置橙云的 `*.996-code.com` 通配记录，它还会撞到 `api` / `www` / `health` Worker。不要装 New API / MinIO / 其它栈。`dsh-runtime:web` 已在服务器编好，**禁止** `docker compose build runtime-image`。
 
 ### Compose overlay（不抢 80/443）
 
 `docker-compose.1panel.yml` 把 control-plane / pages 映到环回，并把 Caddy 放到不会默认启用的 profile `caddy`。用户容器 **3080 仍然不映射**。
 
-在服务器 `platform/deploy`（已有 `.env`，`DATA_ROOT` / `HOST_DATA_ROOT` 均为 `/data`）：
+在服务器（已有 `.env`，`DATA_ROOT` / `HOST_DATA_ROOT` 均为 `/data`）：
 
 ```sh
-cd platform/deploy
+cd /opt/deepseek-harness/platform/deploy
 docker compose -f docker-compose.yml -f docker-compose.1panel.yml up -d --no-build \
   postgres control-plane pages runtime-manager runtime-image
 ```
@@ -220,7 +222,7 @@ docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
   build control-plane pages runtime-manager
 ```
 
-更新登录 UI / 控制面 / pages / manager 代码后，用下面「同步代码」里的 `up -d --build --no-deps control-plane`（可带 pages、runtime-manager）。**禁止** `docker compose build runtime-image`，也禁止不带 `--no-deps` 的 `up --build`（会扫到 `runtime-image`）。
+更新本次 runtime-manager / control-plane 生产修复后，用下面「同步代码」里的 `up -d --build --no-deps runtime-manager control-plane`。**禁止** `docker compose build runtime-image`，也禁止不带 `--no-deps` 的 `up --build`（会扫到 `runtime-image`）。
 
 若误启了 Compose Caddy：`docker compose -f docker-compose.yml -f docker-compose.1panel.yml stop caddy`（或 `rm -f dsh-caddy`）。
 
@@ -229,11 +231,13 @@ docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
 | 网站 | 反代到 | 注意 |
 | --- | --- | --- |
 | `www.996-code.com` | `127.0.0.1:18080` | **必须**开 WebSocket / 透传 `Upgrade` 与 `Connection`。登录后 `/` 反代用户容器 3080，dsh 用 `/api/events.mux`、`/api/events.host`。**Host 保持 `www.996-code.com`**（与 `.env` 的 `APP_HOST`、`dsh --trusted-host` 一致），不要改成 `127.0.0.1:18080` |
-| `pages.996-code.com` 与 `*.pages.996-code.com` | `127.0.0.1:18081` | 现场可能还没建站。Host 用 `$host`（slug 靠子域名）。**剥 Cookie**：`proxy_hide_header Set-Cookie`、`proxy_set_header Cookie ""`（与 Caddyfile 对 pages 去 Cookie / Set-Cookie 同一意图） |
+| `pages.996-code.com` 与 `*.pages.996-code.com` | `127.0.0.1:18081` | 需要在 1Panel 建站并加入这两个域名（若面板不允许同站加通配域名，就建两个相同反代的站点）。Host 用 `$host`（slug 靠子域名）。**剥 Cookie**：`proxy_hide_header Set-Cookie`、`proxy_set_header Cookie ""`（与 Caddyfile 对 pages 去 Cookie / Set-Cookie 同一意图） |
 
-Cookie `Domain` **只能是** `www.996-code.com`（即 `APP_HOST` 本身）。不要写成 `.996-code.com`，否则会进 pages。
+Cookie **不写 Domain**（只给当前访问的主机，例如 `www.996-code.com`）。不要写成 `.996-code.com`，否则会进 pages。
 
-1Panel 面板：反代目标填 `http://127.0.0.1:18080`（www）或 `http://127.0.0.1:18081`（pages），勾选 **WebSocket**。若面板把 Host 写成 `$proxy_host` / 上游地址，改成站点名或下面片段。可粘贴配置：`platform/deploy/openresty.1panel.conf`。
+1Panel 面板：反代目标填 `http://127.0.0.1:18080`（www）或 `http://127.0.0.1:18081`（pages），勾选 **WebSocket**。若面板把 Host 写成 `$proxy_host` / 上游地址，www 改成 `www.996-code.com`，pages 改成 `$host`。可粘贴配置：`platform/deploy/openresty.1panel.conf`。
+
+pages 证书不能依赖 Cloudflare 免费 Universal SSL：它的 `*.996-code.com` 只覆盖一级名称，不覆盖 `foo.pages.996-code.com`。Cloudflare 中 `*.pages.996-code.com` 必须保持灰云；在 1Panel 里用 **DNS-01** 申请同时包含 `pages.996-code.com` 与 `*.pages.996-code.com` 的证书，再绑定到 pages 站点。HTTP-01 不能签通配证书。
 
 www 不要关 Upgrade：关了以后对话会断流（控制面 `upgrade` 进用户 dsh）。`proxy_read_timeout` / `proxy_send_timeout` 建议拉长（片段里 3600s），避免空闲 mux 被 60s 掐掉。
 
@@ -284,56 +288,77 @@ location / {
 }
 ```
 
-### 同步代码（更新登录 UI 后）
+### 同步代码
 
-把本机仓库同步到服务器时 **不要覆盖**：
+服务器代码目录固定为 `/opt/deepseek-harness`。同步时必须保留服务器的 `/opt/deepseek-harness/platform/deploy/.env`，也不要复制、删除或覆盖仓库外的 `/data`。
 
-- 服务器 `platform/deploy/.env`（密钥、主机名、`DATA_ROOT`）
-- `/data`（Postgres、用户卷、快照、备份）
+改动已经 push 时，直接在服务器拉取：
 
-排除示例：`.env`、`platform/deploy/.env`、`node_modules`、`platform/deploy/data`、`/data`。不要把本机 `.env` 或密钥拷上去。
+```sh
+cd /opt/deepseek-harness
+git pull --ff-only
+```
 
-rsync（在本机仓库根；按实际用户/路径改）：
+`.env` 是服务器本地配置，不应被 git 跟踪；`/data` 在仓库外，`git pull` 不会覆盖二者。若本机改动尚未 push，在**本机仓库根**用 rsync，并明确排除 `.env` 与本地数据目录：
 
 ```sh
 rsync -avz \
+  --exclude '.git/' \
   --exclude '.env' \
-  --exclude 'platform/deploy/.env' \
-  --exclude 'node_modules' \
-  --exclude 'platform/deploy/data' \
-  --exclude '.git' \
-  ./ user@SERVER:/opt/Deepseek_Harness/
+  --exclude 'node_modules/' \
+  --exclude 'platform/deploy/data/' \
+  ./ user@SERVER:/opt/deepseek-harness/
 ```
 
-scp 整树前先备份服务器 `.env`，拷完确认没被本机文件盖掉：
+不要用不带排除项的 scp/rsync 整树覆盖服务器。
+
+### 第十五步上线
+
+同步本次修复后，在服务器直接粘贴以下命令。先修正已有用户卷归属，然后**只**重建 runtime-manager 与 control-plane：
 
 ```sh
-# 服务器上
-cp -a /opt/Deepseek_Harness/platform/deploy/.env /tmp/dsh.env.bak
-# 本机 scp 之后，若 .env 被覆盖：
-# cp -a /tmp/dsh.env.bak /opt/Deepseek_Harness/platform/deploy/.env
-```
-
-登录 UI / 控制面代码更新后，在服务器 **只**重建 control-plane（可顺带 pages / runtime-manager）。**禁止** `docker compose build runtime-image`，也禁止不带 `--no-deps` 的 `up --build`（会扫到 `runtime-image`）。
-
-```sh
-cd /opt/Deepseek_Harness/platform/deploy
+cd /opt/deepseek-harness/platform/deploy
+chown -R 1000:1000 /data/users
 docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
-  up -d --build --no-deps control-plane
-# 若也改了 pages / runtime-manager：
-# docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
-#   up -d --build --no-deps control-plane pages runtime-manager
+  up -d --build --no-deps runtime-manager control-plane
 ```
 
-`--no-deps` 不会去 build/重启 postgres、Caddy、`runtime-image`。8G 机上的 `dsh-runtime:web` 保持不动。
+必须保留 `--no-deps`；禁止执行不带 `--no-deps` 的 `up --build`，也禁止 `docker compose build runtime-image`。这不会 build/重启 postgres、pages、Caddy 或 `runtime-image`，8G 机上的 `dsh-runtime:web` 保持不动。
 
-### 浏览器验收（www 已通 18080 时）
+### 上线验收
 
-1. 打开 `https://www.996-code.com/auth/login`，应是控制面登录页（不是 dsh）。
-2. 去 `/auth/register` 用邀请码注册（或已有账号登录）。成功后应进 `/`。
-3. `/` 应是 **dsh Web**（Agent UI），不是登录页、也不是 `dsh-runtime-skeleton` 纯文本。
-4. 开一轮对话：**不断流**。DevTools → Network 里 `/api/events.mux` 与 `/api/events.host` 应为 **101 Switching Protocols**（WebSocket）。若 400/502 或一直 pending 后断开，检查 www 站点是否透传 `Upgrade` / `Connection`，以及 Host 是否仍是 `www.996-code.com`。
-5. **无痕窗口**打开用户站（`https://pages.996-code.com/` 或 `https://{slug}.pages.996-code.com/`）：Application → Cookies **没有** `dsh_session`。响应不应出现 `Set-Cookie`。（pages 站点尚未创建时，这一条等建好再测。）
+先登录并把有效 Cookie 保存为 `cookies.txt`，再在服务器的 `/opt/deepseek-harness/platform/deploy` 执行：
+
+```sh
+cd /opt/deepseek-harness/platform/deploy
+
+# 必须返回 dsh 的 JavaScript；不能是 JSON error，也不能是控制面 HTML
+curl -sk -b cookies.txt -D /tmp/dsh-plugin.headers \
+  -o /tmp/dsh-plugin-client.js \
+  https://www.996-code.com/plugins/@deepseek-ai/dsh-typert-registry/client.js
+head -n 20 /tmp/dsh-plugin.headers
+head -c 200 /tmp/dsh-plugin-client.js
+
+# /plugins 仍是控制面的官方插件组合 HTML 页面
+curl -sk -b cookies.txt -D - https://www.996-code.com/plugins | head -n 20
+
+# 用户容器应为 Up
+docker ps --filter 'name=dsh-runtime-' --format 'table {{.Names}}\t{{.Status}}'
+
+# 不应出现 EACCES 或 mkdir node_modules
+docker compose -f docker-compose.yml -f docker-compose.1panel.yml \
+  logs --tail=300 runtime-manager control-plane \
+  | grep -E 'EACCES|mkdir.*node_modules' && echo 'FAILED: permission error found' || echo 'OK: no permission error'
+```
+
+浏览器清单：
+
+1. 打开 `https://www.996-code.com/auth/login` 登录；`/` 应是 **dsh Web**，不是登录页或 `dsh-runtime-skeleton`。
+2. 强制刷新（Ctrl+F5），页面和 DevTools Console 都不应出现 `Failed to load plugins`。
+3. 打开 **Models**，填写该用户自己的 DeepSeek API Key；不要写进 Compose、镜像或全局 `.env`。
+4. 发起一轮对话并确认完整返回、不断流。
+5. DevTools → Network 中 `/api/events.mux` 应为 **101 Switching Protocols**。若 400/502 或中途断开，检查 www 是否透传 `Upgrade` / `Connection`，Host 是否仍为 `www.996-code.com`。
+6. **无痕窗口**打开用户站（`https://pages.996-code.com/` 或 `https://{slug}.pages.996-code.com/`）：Application → Cookies 没有 `dsh_session`，响应也没有 `Set-Cookie`。
 
 编排自检（不必 up）：
 
@@ -353,7 +378,7 @@ docker compose -f docker-compose.yml -f docker-compose.1panel.yml --env-file .en
 
 - 本机：`TLS_MODE=internal`，不必公网 DNS。
 - 服务器 Caddy 路径：`*.pages.…` **必须** DNS-01（HTTP-01 签不了通配名）。
-- **1Panel 生产**：Cloudflare 橙云；源站证书用 1Panel。SSL 先 Flexible，源站 HTTPS 好了再 Full。`www.996-code.com` / `pages.996-code.com` / `*.pages.996-code.com` 指到同一台机。
+- **1Panel 生产**：`www.996-code.com`、`pages.996-code.com`、`*.pages.996-code.com` 指到同一台机并全部设为 Cloudflare 灰云（DNS only）。`*.pages.996-code.com` 在 1Panel 用 DNS-01 申请通配证书；Cloudflare 免费 Universal SSL 的 `*.996-code.com` 不覆盖 `foo.pages.996-code.com`。
 - 登录域与 pages 域保持兄弟关系（或不同注册域），不要把 App 放在 `example.com` 再把站点放在 `*.example.com`。
 
 ## 服务、端口、网络
@@ -411,7 +436,7 @@ Caddy 的 `{$APP_HOST}` 整站反代 `control-plane:8080`；会话 Cookie 只写
 
 `APP_HOST` 上除 `/healthz`、`GET|POST /auth/login`、`GET|POST /auth/register`、`GET /auth/logout` 外都要有效会话。
 
-控制面**保留路径**（不会反代进 dsh）：`/healthz`、`/auth/*`、`/me`、`/runtime/status`、`/files`、`/files/*`、`/sites`、`/sites/*`、`/plugins`、`/plugins/*`、`/admin`、`/admin/*`。`/api` 仍是 dsh，不要占用。
+控制面**保留路径**（不会反代进 dsh）：`/healthz`、`/auth/*`、`/me`、`/runtime/status`、`/files`、`/files/*`、`/sites`、`/sites/*`、`/plugins`、`/plugins/presets`、`/plugins/me`、`/plugins/apply`、`/admin`、`/admin/*`。dsh 的客户端脚本在 `/plugins/<id>/client.js`，必须反代进用户容器，不要把整个 `/plugins/*` 留给控制面。`/api` 仍是 dsh，不要占用。
 
 `PLATFORM_USER_TOKEN` **不能**当 `dsh_session`，也不能调 `/auth`、`/files`、`/plugins`、`/me`、`/admin` 或 `/sites` HTML / rollback / takedown / token；只开放 `POST /sites/publish` 与 `GET /sites/list`。过期作废。KV `writeToken` 调这些接口是 **401**。
 
@@ -433,7 +458,7 @@ docker compose exec postgres psql -U dsh -d dsh -c "INSERT INTO invites (code) V
 
 `Set-Cookie` 名：`dsh_session`。
 
-- `Domain` = `APP_HOST` 本身（本机 `app.localhost`；1Panel 生产 **`www.996-code.com`**），**禁止** `.example.com` / `.996-code.com` / `.localhost` 父域
+- 不写 `Domain`（host-only；本机 `app.localhost`，生产 `www.996-code.com`），**禁止** `.example.com` / `.996-code.com` / `.localhost` 父域
 - `HttpOnly`、`Secure`、`SameSite=Lax`、`Path=/`
 - 只由 `{$APP_HOST}` 的控制面下发。Caddy 对 `{$PAGES_HOST}` 与 `*.{$PAGES_PARENT}` 已 `request_header -Cookie` 且 `header -Set-Cookie`，pages 域用不了这条会话
 
@@ -581,7 +606,7 @@ sh platform/scripts/backup-postgres.sh /data/backups
 每天凌晨（宿主机 cron 示例）：
 
 ```
-15 3 * * * root /opt/Deepseek_Harness/platform/scripts/backup-postgres.sh /data/backups
+15 3 * * * root /opt/deepseek-harness/platform/scripts/backup-postgres.sh /data/backups
 ```
 
 这只备份数据库。**用户卷 `/data/users` 与快照 `/data/snapshots` 需另行复制**（例如 `rsync -a /data/users /data/snapshots /mnt/backup/dsh/`）。Caddy 证书在 `/data/caddy`。
@@ -608,7 +633,7 @@ node platform/scripts/l-ops-selftest.js
 | `GET /plugins/me` | 是 | `{ exists, parsed, disabledOfficialIds? }`。解析失败只返回文件是否存在，**不把 yaml 打出来** |
 | `POST /admin/plugin-presets` | 是（admin） | `{ name, pluginIds }`；表 `plugin_presets`（IF NOT EXISTS） |
 
-`/plugins` 与 `/plugins/*` 已加入 `isReservedControlPath`。不要占 `/api`。
+`/plugins`、`/plugins/presets`、`/plugins/me`、`/plugins/apply` 已加入 `isReservedControlPath`。`/plugins/@scope/pkg/client.js` 与 `/plugins/events` 仍走 dsh。不要占 `/api`。
 
 ```sh
 # 未登录：401

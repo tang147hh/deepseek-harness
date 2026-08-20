@@ -178,7 +178,7 @@ async function main() {
     const cookie = String(res.headers["set-cookie"] || "");
     assert.match(cookie, /dsh_session=/);
     assert.match(cookie, /Max-Age=0/);
-    assert.match(cookie, /Domain=app\.localhost/);
+    assert.doesNotMatch(cookie, /Domain=/);
   });
 
   if (failed) {
