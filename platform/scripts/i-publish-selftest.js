@@ -444,7 +444,7 @@ async function main() {
     }
   });
 
-  await check("tool registers publish_site, not /api; description requires explicit ask + approval", () => {
+  await check("tool registers publish_site with one approval prompt and no silent publish", () => {
     const registered = [];
     const ctx = {
       tools: {
@@ -460,8 +460,20 @@ async function main() {
     bridge.apply(ctx);
     assert.equal(registered.length, 1);
     assert.equal(registered[0].name, "publish_site");
-    assert.match(registered[0].description, /explicitly asks to publish/i);
-    assert.match(registered[0].description, /approval/i);
+    assert.match(registered[0].description, /Writing or creating a website is not permission to publish/i);
+    assert.match(registered[0].description, /approval card is the only question/i);
+    assert.match(registered[0].description, /Do not ask.*prose.*ask_user_question/i);
+    assert.match(registered[0].description, /explicitly asked to publish or go live/i);
+    assert.equal(registered[0].presentCall({ dir: "sites/demo" }).title, "发布站点到公网");
+    assert.match(bridge.buildApprovalReason("sites/demo"), /发布到公网/);
+    assert.match(
+      bridge.buildApprovalReason("sites/demo"),
+      /https:\/\/\{username\}-demo\.\{PAGES_PARENT\}\//,
+    );
+    assert.match(
+      bridge.buildApprovalReason("sites/demo", "chosen-slug"),
+      /https:\/\/chosen-slug\.\{PAGES_PARENT\}\//,
+    );
     assert.ok(!String(registered[0].name).includes("/api"));
     const src = fs.readFileSync(path.join(__dirname, "../agent-bridge/index.js"), "utf8");
     assert.ok(!src.includes("listen("));
@@ -469,9 +481,40 @@ async function main() {
     assert.ok(src.includes("/sites/publish"));
   });
 
+  await check("approval missing: fail closed without publishing", async () => {
+    const registered = [];
+    let published = false;
+    const ctx = {
+      tools: {
+        register(def) {
+          registered.push(def);
+        },
+      },
+      get() {
+        return undefined;
+      },
+    };
+    bridge.apply(ctx);
+    const orig = globalThis.fetch;
+    globalThis.fetch = async () => {
+      published = true;
+      return { status: 200, ok: true, text: async () => "{}" };
+    };
+    try {
+      await assert.rejects(
+        () => registered[0].execute({ dir: "sites/demo" }, { agent: { id: "a" }, callId: "c0" }),
+        /approval service is required/,
+      );
+      assert.equal(published, false);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
   await check("approval composed: rejected does not publish", async () => {
     const registered = [];
     let published = false;
+    let reason = "";
     const ctx = {
       tools: {
         register(def) {
@@ -481,7 +524,8 @@ async function main() {
       get(name) {
         if (name === "approval") {
           return {
-            async request() {
+            async request(input) {
+              reason = input.reason;
               return "rejected";
             },
           };
@@ -501,8 +545,69 @@ async function main() {
         /not approved/,
       );
       assert.equal(published, false);
+      assert.match(reason, /发布到公网/);
+      assert.match(reason, /https:\/\/\{username\}-demo\.\{PAGES_PARENT\}\//);
     } finally {
       globalThis.fetch = orig;
+    }
+  });
+
+  await check("approval allowed-once publishes and returns the public URL", async () => {
+    const registered = [];
+    let approvalCalls = 0;
+    let published = false;
+    const ctx = {
+      tools: {
+        register(def) {
+          registered.push(def);
+        },
+      },
+      get(name) {
+        if (name === "approval") {
+          return {
+            async request() {
+              approvalCalls += 1;
+              return "allowed-once";
+            },
+          };
+        }
+        return undefined;
+      },
+    };
+    bridge.apply(ctx);
+    const origFetch = globalThis.fetch;
+    const previousToken = process.env.PLATFORM_TOKEN;
+    process.env.PLATFORM_TOKEN = tokenA;
+    globalThis.fetch = async () => {
+      published = true;
+      return {
+        status: 200,
+        ok: true,
+        async text() {
+          return JSON.stringify({
+            ok: true,
+            url: "https://alice-demo.pages.localhost/",
+            slug: "alice-demo",
+            version: 1,
+          });
+        },
+      };
+    };
+    try {
+      const result = await registered[0].execute(
+        { dir: "sites/demo" },
+        { agent: { id: "a" }, callId: "c2" },
+      );
+      assert.equal(approvalCalls, 1);
+      assert.equal(published, true);
+      assert.equal(result.url, "https://alice-demo.pages.localhost/");
+    } finally {
+      globalThis.fetch = origFetch;
+      if (previousToken === undefined) {
+        delete process.env.PLATFORM_TOKEN;
+      } else {
+        process.env.PLATFORM_TOKEN = previousToken;
+      }
     }
   });
 

@@ -981,6 +981,10 @@ node platform/scripts/h-kv-selftest.js
 
 `/sites` 网页继续能用。I 多一条 **Agent 通道**：对话里模型可调用 `publish_site({ dir, slug? })`，把**当前用户**的 `workspace/sites/<name>` 打成与 G 相同的快照（仍不绑直播 workspace）。工具**不占 `/api`**。
 
+**写文件不等于上线。** 用户只要求“写个网页”时，Agent 先用文件工具完成 `sites/<name>/`，不能把这句话当作发布授权；写完后直接调用一次 `publish_site`，由 harness 已有的 approval 卡片作为**唯一**的发布询问，不要先在回复里或用 `ask_user_question` 再问一遍。用户已明确说“发布/上线”时也直接调用工具，仍须在卡片中点“允许一次”；拒绝、关闭卡片或 approval 服务不可用时一律不发布。
+
+卡片必须明确说明这是“发布到公网”，并显示 `https://{slug}.{PAGES_PARENT}/` 形式的地址；只有同意并成功创建快照后才返回真实公网 URL。生产环境必须先把 `pages.PAGES_PARENT` 与 `*.PAGES_PARENT` 以灰云 DNS、DNS-01 通配证书和 1Panel `18081` 反代接通，否则即使发布成功，返回的 URL 也无法访问。
+
 用户容器没有 `dsh_session`（反代仍不转发 Cookie / Authorization）。KV `writeToken` 不是身份，也不能换 JWT。因此 runtime-manager 在 **ensure/create** 时为该 `userId` 签发短时 **`PLATFORM_USER_TOKEN`**：
 
 - HMAC-SHA256，密钥 **`PLATFORM_TOKEN_SECRET`**（不要复用 `SESSION_SECRET`，不要用 KV write token）
@@ -991,7 +995,7 @@ node platform/scripts/h-kv-selftest.js
 - token **不能**当登录 Cookie，不能调 `/auth`、`/files`、`/me`、`/admin`、rollback/takedown/token；过期作废
 - 缺 token 从容器打 publish → **401**；KV writeToken 打 `/sites/publish` → **401**
 
-插件：`platform/agent-bridge`（Cordis），注册 `publish_site`。描述写明：**仅当用户明确要求发布网站时使用**；若组合里有 approval，发布前要人点同意。成功则把公网 URL 和（若响应里有一次性 `writeToken`）写进工具结果。
+插件：`platform/agent-bridge`（Cordis），注册 `publish_site`。工具调用只发起一次 approval；没有 approval 服务时 fail closed，绝不静默发布。成功则把公网 URL 和（若响应里有一次性 `writeToken`）写进工具结果。
 
 装进运行时：`Dockerfile.runtime` **末层 COPY** 到 `/opt/dsh-platform/agent-bridge`（不要为了改插件重编整个 monorepo）。ensure 时若用户 home **没有** `cordis.patch.yml` 则写入一行加载该插件；**已有用户 patch 不覆盖**。
 

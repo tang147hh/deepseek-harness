@@ -23,3 +23,9 @@ services:
   pages:
     ports:
       - "127.0.0.1:18081:8080"
+    # A container attached only to Docker's `internal: true` network does not
+    # activate published host ports on some Docker versions. The existing edge
+    # network supplies a gateway without exposing pages to user runtimes.
+    networks:
+      - internal
+      - edge

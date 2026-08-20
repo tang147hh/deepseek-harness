@@ -13,9 +13,10 @@ const TOKEN_FILE = ".platform-token";
 const DEFAULT_PLATFORM_URL = "http://control-plane:8080";
 
 const DESCRIPTION = [
-  "Publish the current user's workspace/sites/<name> directory as a public static site snapshot.",
-  "Only use this tool when the user explicitly asks to publish a website.",
-  "If this composition has an approval service, the user must click approve before publish proceeds.",
+  "Request approval to publish the current user's workspace/sites/<name> directory as a public static site snapshot.",
+  "Writing or creating a website is not permission to publish it: finish the files, then call this tool exactly once so its approval card is the only question asking whether to publish.",
+  "Do not ask about publishing in prose or with ask_user_question before calling this tool; that would create two confirmation steps.",
+  "If the user already explicitly asked to publish or go live, call this tool directly, but publication still requires the user to approve its card.",
   "dir must be a workspace-relative path under sites/ (one segment, e.g. sites/demo) with index.html;",
   "forbidden files such as .env and *.pem are rejected by the control plane.",
   "Do not use this for files, KV writes, or any path outside sites/.",
@@ -156,6 +157,13 @@ export function formatPublishResult(json) {
   return lines.join("\n") || JSON.stringify(json);
 }
 
+export function buildApprovalReason(dir, slug) {
+  const { rel, name } = parsePublishDir(dir);
+  const requestedSlug = String(slug ?? "").trim();
+  const publicSlug = requestedSlug || `{username}-${name}`;
+  return `发布到公网：将 ${rel} 创建为静态站快照。允许后公网地址形如 https://${publicSlug}.{PAGES_PARENT}/。`;
+}
+
 function toOutput(json) {
   const out = {
     ok: Boolean(json.ok),
@@ -217,7 +225,7 @@ export function apply(ctx) {
     presentCall(args) {
       return {
         card: "generic",
-        title: "Publish site",
+        title: "发布站点到公网",
         kind: "other",
         rawInput: args && args.dir ? args.dir : args,
       };
@@ -226,20 +234,21 @@ export function apply(ctx) {
       const dir = args && args.dir;
       parsePublishDir(dir);
       const approval = ctx.get("approval");
-      if (approval && typeof approval.request === "function") {
-        if (!exec || !exec.agent) {
-          throw new Error("publish_site: approval is composed; an owning agent session is required");
-        }
-        const outcome = await approval.request({
-          agent: exec.agent,
-          toolName: "publish_site",
-          callId: exec.callId,
-          reason: `Publish workspace ${String(dir)} as a public static site.`,
-          signal: exec.signal,
-        });
-        if (outcome !== "allowed-once") {
-          throw new Error(`publish_site: publication was not approved (${outcome})`);
-        }
+      if (!approval || typeof approval.request !== "function") {
+        throw new Error("publish_site: approval service is required; publication was not approved");
+      }
+      if (!exec || !exec.agent) {
+        throw new Error("publish_site: approval is composed; an owning agent session is required");
+      }
+      const outcome = await approval.request({
+        agent: exec.agent,
+        toolName: "publish_site",
+        callId: exec.callId,
+        reason: buildApprovalReason(dir, args && args.slug),
+        signal: exec.signal,
+      });
+      if (outcome !== "allowed-once") {
+        throw new Error(`publish_site: publication was not approved (${outcome})`);
       }
       const token = await readPlatformToken();
       const json = await callPublishSite({
